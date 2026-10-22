@@ -49,5 +49,6 @@ while True:
         display.show(Image.HAPPY)
     if i == 1:
         motors_speed(50, 10)  # Turn left
+        display.show(Image.SAD)
     if i == 11:
         motors_speed(25, 25)  # Move forward
