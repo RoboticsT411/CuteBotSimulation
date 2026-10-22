@@ -1,0 +1,7 @@
+python -m pip install uflash --trusted-host pypi.org --trusted-host files.pythonhosted.org
+git clone https://github.com/mjtroniks/Microbit.git
+git clone https://github.com/LSBU-Electronics-Lab/MicroPython.git
+python -m pip install pyserial
+-----------In case of SSL problem------------  
+git config --global http.sslVerify false
+ py -m pip install pyserial
