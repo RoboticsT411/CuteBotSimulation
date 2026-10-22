@@ -693,9 +693,6 @@ class SimWindow:
             if min(cc - a, d - b) > 16:
                 c.create_text((a + cc) / 2, (b + d) / 2, fill="#FFFFFF",
                               font=("Segoe UI", 8, "bold"), text=f"{i + 1}")
-        # start marker
-        sx, sy = self.w2s(*m.start[:2])
-        c.create_oval(sx - 4, sy - 4, sx + 4, sy + 4, outline="#1F6FEB", width=2)
         # axes at the origin (bottom-left)
         c.create_line(x0, y1, x0 + 34, y1, fill="#C0392B", width=2, arrow="last")
         c.create_line(x0, y1, x0, y1 - 34, fill="#27AE60", width=2, arrow="last")
@@ -704,8 +701,7 @@ class SimWindow:
         c.create_text(x0 + 4, y1 - 42, text="y", fill="#27AE60", anchor="w",
                       font=("Segoe UI", 9, "bold"))
         c.create_text(x0, y1 + 16, anchor="w", fill=MUTED, font=("Segoe UI", 9),
-                      text=f"{m.width:g} x {m.height:g} cm   grid {step} cm   origin bottom-left"
-                           f"   start = blue circle")
+                      text=f"{m.width:g} x {m.height:g} cm   grid {step} cm   origin bottom-left")
         self._trail_items = []
         self._draw_trail(full=True)
 
