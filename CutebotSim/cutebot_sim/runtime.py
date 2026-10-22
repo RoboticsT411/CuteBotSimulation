@@ -68,6 +68,7 @@ class Runtime:
         self.btn_consumed = {"a": 0, "b": 0}
         self._last_pose_req = 0
         self._world_seq = 0
+        self._gain_set = False
         self._error_text = None
         self._stop = False
         self._trace = None
@@ -212,8 +213,9 @@ class Runtime:
                 if s.get("world_seq") != self._world_seq:
                     self._read_world(s)
                 g = s.get("motor_gain")
-                if g[0] > 0 and g[1] > 0:          # 0 = old window without the setting
-                    self.robot.motor_gain = g
+                if g[0] >= 0 and g[1] >= 0 and (g[0] > 0 or g[1] > 0 or self._gain_set):
+                    self.robot.motor_gain = g          # both 0 before the window sets it = ignore
+                    self._gain_set = True
                 req = s.get("pose_req_seq")
                 if req != self._last_pose_req:
                     self._last_pose_req = req
@@ -268,6 +270,7 @@ class Runtime:
         with r.lock:
             s.set("pose", (r.x, r.y, r.heading * 57.29577951308232))
             s.set("motors", r.motor_cmd)
+            s.set("wheel_v", r.wheel_v)
             s.set("line", r.line_sensors())
             s.set("lights", r.lights)
             s.set("neopixels", r.neopixels)

@@ -36,6 +36,7 @@ OBST_FILL = "#B5834F"
 OBST_EDGE = "#6E4A27"
 STALE_S = 0.6
 
+TREAD_MARKS = 4          # tread lines drawn on each wheel
 ERASER_CM = 2.5          # eraser radius
 JOIN_CM = 3.0            # a new stroke joins an existing line end closer than this
 ROBOT_GRAB_CM = 6.0
@@ -713,6 +714,9 @@ class SimWindow:
                                       state="hidden")
         it["neo"] = [c.create_oval(0, 0, 0, 0, fill="", outline="") for _ in range(2)]
         it["wheels"] = [c.create_polygon(0, 0, 0, 0, fill="#151515", outline="") for _ in range(2)]
+        # tread marks that scroll at each wheel's real speed
+        it["treads"] = [[c.create_line(0, 0, 0, 0, fill="#6B7280", width=2) for _ in range(TREAD_MARKS)]
+                        for _ in range(2)]
         it["body"] = c.create_polygon(0, 0, 0, 0, fill="#2A2E33", outline="#0E0F10", width=2)
         it["board"] = c.create_polygon(0, 0, 0, 0, fill="#1B1E22", outline="#55606A")
         it["lights"] = [c.create_oval(0, 0, 0, 0, fill="#555", outline="#111") for _ in range(2)]
@@ -720,7 +724,7 @@ class SimWindow:
         it["sonar"] = c.create_polygon(0, 0, 0, 0, fill="#C9CED3", outline="#555")
         self._robot_items = it
 
-    def _update_robot(self, pose, lights, neo, line, sonar_cm, sonar_active):
+    def _update_robot(self, pose, lights, neo, line, sonar_cm, sonar_active, tread=(0.0, 0.0)):
         if self._robot_items is None:
             self._make_robot_items()
         c, it, s = self.canvas, self._robot_items, self.scale
@@ -740,8 +744,14 @@ class SimWindow:
         shape = R.robot_shape()
         c.coords(it["body"], *poly(shape["body"]))
         c.coords(it["board"], *poly(shape["board"]))
+        r_wheel = R.WHEEL_DIAMETER_CM / 2.0
+        spacing = 2 * r_wheel / TREAD_MARKS
         for i in range(2):
             c.coords(it["wheels"][i], *poly(shape["wheels"][i]))
+            inner, outer = shape["wheels"][i][0][1], shape["wheels"][i][2][1]
+            for k, line_item in enumerate(it["treads"][i]):
+                a = -r_wheel + (k * spacing + tread[i]) % (2 * r_wheel)
+                c.coords(line_item, *P(a, inner), *P(a, outer))
         c.coords(it["sonar"], *poly(shape["sonar"]))
         r = shape["light_r"] * s
         gr = shape["glow_r"] * s
@@ -771,7 +781,8 @@ class SimWindow:
         else:
             c.itemconfigure(it["ray"], state="hidden")
             c.itemconfigure(it["ray_txt"], state="hidden")
-        for item in (it["ray"], it["ray_txt"], *it["neo"], *it["wheels"], it["body"], it["board"],
+        for item in (it["ray"], it["ray_txt"], *it["neo"], *it["wheels"], *it["treads"][0],
+                     *it["treads"][1], it["body"], it["board"],
                      *it["lights"], *it["sensors"], it["sonar"]):
             c.tag_raise(item)
         if self._hover_items:
@@ -1184,8 +1195,9 @@ class SimWindow:
         except ValueError as e:
             self.gain_msg.configure(text=str(e) + " (or press Reveal first)", fg=ERR)
             return
-        if not (50 <= l <= 150 and 50 <= r <= 150):
-            self.gain_msg.configure(text="Use values between 50 and 150 %", fg=ERR)
+        if not (0 <= l <= 200 and 0 <= r <= 200):
+            self.gain_msg.configure(text="Use values between 0 and 200 % (0 = wheel does not turn)",
+                                    fg=ERR)
             return
         self.motor_gain = [l / 100.0, r / 100.0]
         self.gain_hidden = False
@@ -1232,7 +1244,7 @@ class SimWindow:
     def _apply_sim_settings(self, sim):
         try:
             l, r = (float(v) for v in sim.get("motor_strength_percent", [100, 100]))
-            if 50 <= l <= 150 and 50 <= r <= 150:
+            if 0 <= l <= 200 and 0 <= r <= 200:
                 self.motor_gain = [l / 100.0, r / 100.0]
             self.gain_hidden = bool(sim.get("mismatch_hidden", False))
         except (TypeError, ValueError):
@@ -1419,9 +1431,14 @@ class SimWindow:
             pose = tuple(self.world.start)
 
         motors = sh.get("motors") if published else [0.0, 0.0]
+        wheel_v = sh.get("wheel_v") if published else [0.0, 0.0]
+        dt = min(0.1, now - getattr(self, "_last_frame_t", now))
+        self._last_frame_t = now
+        tp = getattr(self, "_tread_pos", [0.0, 0.0])
+        self._tread_pos = [tp[0] + wheel_v[0] * dt, tp[1] + wheel_v[1] * dt]
         line = sh.get("line") if published else [1, 1]
         self._update_robot(pose, sh.get("lights"), sh.get("neopixels"), line,
-                           sh.get("sonar_cm"), sh.get("sonar_active") and published)
+                           sh.get("sonar_cm"), sh.get("sonar_active") and published, self._tread_pos)
 
         for i, v in enumerate(sh.get("display")):
             col = LED_OFF if v == 0 else _rgb(*_mix((255, 40, 30), (58, 20, 20), 0.25 + 0.75 * v / 9))
@@ -1445,15 +1462,16 @@ class SimWindow:
         self.message.configure(text=sh.get("message") if state == shared.STATE_ERROR else "")
 
         self._update_trail(has_prog, live, pose, motors)
-        g = self.motor_gain
-        actual = ""
-        if (g[0] != 1.0 or g[1] != 1.0) and not self.gain_hidden and any(motors):
-            actual = f"\n  actual   L {motors[0] * g[0]:+5.1f} %   R {motors[1] * g[1]:+5.1f} %"
+        pct = 100.0 / R.CM_PER_S_AT_100
+        wheels = f"Wheels     L {wheel_v[0] * pct:+5.1f} %   R {wheel_v[1] * pct:+5.1f} %   (real)\n"
+        if self.gain_hidden:
+            wheels = "Wheels     hidden mismatch (Motors tab)\n"
         x, y = self.to_user(pose[0], pose[1])
         a = _wrap(-pose[2])
         sonar = f"{sh.get('sonar_cm'):5.1f} cm" if sh.get("sonar_active") and published else "  (not used)"
         self.readout.configure(text=(
-            f"Motors     L {motors[0]:+5.0f} %   R {motors[1]:+5.0f} %{actual}\n"
+            f"Motors     L {motors[0]:+5.0f} %   R {motors[1]:+5.0f} %   (code)\n"
+            f"{wheels}"
             f"Line       L {line[0]}   R {line[1]}   (0 = black)\n"
             f"Sonar     {sonar}\n"
             f"Position   x {x:5.1f}  y {y:5.1f} cm\n"

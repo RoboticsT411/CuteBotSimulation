@@ -56,35 +56,79 @@ python -c "import tkinter; print('Python and Tkinter OK')"
 
 ### 2. Get the project
 
-Any one of these:
+Choose **one** option. Options A and C use Git, so you can download updates later with one
+command (`git pull`); option B needs nothing extra.
 
-- **PyCharm:** Welcome screen → **Clone Repository** (or **File → New → Project from Version Control**),
-  URL `https://github.com/RoboticsT411/CuteBotSimulation.git` → **Clone** → **Trust Project**.
-- **Terminal:**
-  ```
-  git clone https://github.com/RoboticsT411/CuteBotSimulation.git
-  ```
-  then in PyCharm **File → Open…** the `CuteBotSimulation` folder.
-- **ZIP:** on GitHub **Code → Download ZIP**, extract it, then **File → Open…** the folder.
+**Option A – Clone in PyCharm (recommended)**
 
-The folder you open must contain `install_simulator.py`, `microbit/` and `cutebot_sim/`
-directly inside it.
+1. Open PyCharm. On the Welcome screen click **Clone Repository**
+   (if a project is already open: **File → New → Project from Version Control**).
+2. In **URL** paste: `https://github.com/RoboticsT411/CuteBotSimulation.git`
+3. Choose a **Directory**, e.g. `C:\Users\<you>\PycharmProjects\CuteBotSimulation`.
+4. Click **Clone**, then **Trust Project**.
+
+**Option B – Download a ZIP (no Git needed)**
+
+1. On the GitHub page click **Code → Download ZIP**.
+2. Right-click the ZIP → **Extract All…**
+3. In PyCharm: **File → Open…**, select the extracted folder, then **Trust Project**.
+
+**Option C – Clone in a terminal**
+
+1. Open a terminal (Windows: Start → *Terminal*) and go to the folder where you keep projects.
+2. Run:
+   ```
+   git clone https://github.com/RoboticsT411/CuteBotSimulation.git
+   ```
+3. In PyCharm: **File → Open…**, select the new `CuteBotSimulation` folder, then **Trust Project**.
+
+**Check before you continue:** in PyCharm's **Project** panel (left) you should see the
+`CuteBotSimulation` folder with a **`CutebotSim`** folder inside it. The simulator files
+(`install_simulator.py`, `microbit/`, `cutebot_sim/`, `labs/`, `examples/`) are in `CutebotSim`.
+
+If the repository is private, Git asks you to sign in to GitHub the first time
+(you need access from your lecturer).
 
 ### 3. Create the interpreter
 
-**File → Settings → Project → Python Interpreter → Add Interpreter → Add Local Interpreter →
-Virtualenv Environment → New** (location: `venv` in the project, base: your Python 3).
-Do not install any packages.
+PyCharm may offer to create a virtual environment when the project opens: accept it. Otherwise:
+
+1. **File → Settings → Python → Python Interpreter**
+   (macOS: **PyCharm → Settings**; older PyCharm versions: **Project: … → Python Interpreter**).
+2. **Add Interpreter → Add Local Interpreter → Virtualenv Environment → New**.
+3. Location: `venv` inside the project folder. Base interpreter: your Python 3. Click **OK**.
+4. The bottom-right corner of PyCharm should now show this interpreter.
+
+The simulator needs no packages, so don't install any here. In particular, never install
+`microbit`, `microbit-stubs` or `microbit-dummy` (see the warning below). The only packages you
+ever need are `uflash` and `pyserial`, and only for uploading to a real robot.
 
 ### 4. Run `install_simulator.py` once
 
-Right-click **install_simulator.py** → **Run**. It registers the simulator with this
-interpreter so `from microbit import *` works from any folder. It installs nothing and needs
-no internet. Run it again after creating a new virtual environment or moving the project.
+1. In the **Project** panel, click the arrow next to the **`CutebotSim`** folder to expand it.
+2. Right-click **`install_simulator.py`** (inside `CutebotSim`) → **Run 'install_simulator'**.
+
+   > **If PyCharm asks for an environment** (a yellow bar at the top of the editor saying
+   > *Create a virtual environment* / *Custom Environment*), do **not** create a new one:
+   > click **Custom Environment** → **Select existing** → Type **Python** → click **…** and
+   > choose `venv\Scripts\python.exe` inside your project folder (the `venv` created in step 3;
+   > macOS/Linux: `venv/bin/python`) → **OK**. Then run `install_simulator.py` again.
+
+3. The Run panel at the bottom should end with
+   `Done. Any file with 'from microbit import *' will now open the simulator.`
+   Check that its **Interpreter** line shows the `venv` you created in step 3.
+
+This registers the simulator with your interpreter, so `from microbit import *` works from any
+folder. It installs nothing and needs no internet. Run it again after creating a new virtual
+environment or moving the project.
+
+Optional, to stop PyCharm underlining `microbit` in red: right-click the **`CutebotSim`** folder →
+**Mark Directory as → Sources Root**.
 
 ### 5. Run a program
 
-Create a file in `labs/` (right-click **labs** → **New → Python File**, no spaces in the name):
+Create a file in **`CutebotSim/labs`** (expand `CutebotSim`, right-click **labs** →
+**New → Python File**, no spaces in the name):
 
 ```python
 from microbit import *
@@ -94,7 +138,7 @@ while True:
 ```
 
 Right-click in the editor → **Run**. The simulator window opens. Try
-`examples/03_line_follow.py` to see the robot follow the line.
+`CutebotSim/examples/03_line_follow.py` to see the robot follow the line.
 
 > **Never install `microbit`, `microbit-stubs` or `microbit-dummy`** with pip or PyCharm's
 > package manager. They contain empty look-alike modules and programs would run without doing

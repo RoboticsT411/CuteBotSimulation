@@ -48,6 +48,7 @@ _FIELDS = [
     ("message", "120s", 1),     # P  last error / status text
     ("pose", "f", 3),           # P  x, y (cm), heading (deg, 0 = facing right, 90 = facing down)
     ("motors", "f", 2),         # P  left, right (-100..100) as last written over I2C
+    ("wheel_v", "f", 2),        # P  real wheel speeds, left/right (cm/s), after motor mismatch
     ("line", "B", 2),           # P  left, right line sensor (0 = black line, 1 = white)
     ("sonar_cm", "f", 1),       # P  distance ahead (cm)
     ("sonar_active", "B", 1),   # P  1 once the program has triggered the sonar

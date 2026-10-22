@@ -22,4 +22,4 @@ def motors_speed(left_wheel_speed, right_wheel_speed):
     i2c.write(car_address, bytearray([0x01, right_direction, right_wheel_speed, 0]))
 
 # Set the speed of both motors to 25
-motors_speed(-25, -25)
+motors_speed(25, 25)

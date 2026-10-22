@@ -21,7 +21,7 @@ def set_car_lights(light, R, G, B):
     i2c.write(car_address, bytearray([light, R, G, B]))
 
 
-set_car_lights(left_light, 190, 3, 3)
+set_car_lights(left_light, 150, 120, 100)
 
 set_car_lights(right_light, 0, 255, 0)
 
