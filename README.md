@@ -21,6 +21,7 @@ Labs 1–9 run unmodified; Lab 10 has a ready-made maze.
 - Motor mismatch: make one wheel weaker, like a real robot, and get a suggested speed
   correction to drive straight.
 - Debugging: breakpoints pause the robot too, so you can inspect sensor values.
+- Real hardware: upload the same file to a Cutebot with the micro:bit Flasher + REPL tool.
 - Standard library only: nothing to `pip install`.
 
 ## What is simulated
@@ -137,14 +138,69 @@ exactly as you would with a real robot. **Random hidden** sets a secret mismatch
 Speeds are whole numbers: the Cutebot receives each speed as one byte, so `25.5` raises
 `TypeError` on the micro:bit and in the simulator. Use `int(round(speed))`.
 
-## Running on the real Cutebot
+## Hardware support: uploading to a real Cutebot
 
-1. Put the robot on its stand and plug the ultrasonic sensor into **SR04** (not I2C).
-2. Install the **MicroPython** plugin in PyCharm and select **BBC micro:bit V2**
-   (see the [lab wiki](https://github.com/LSBU-Electronics-Lab/MicroPython/wiki)).
-3. Connect the micro:bit by USB and use **Flash** on your file.
+The same `.py` file that runs in the simulator runs on the real robot. The micro:bit has its
+own built-in `microbit` module, so the simulator files are not used there. To upload, use the
+**micro:bit Flasher + REPL** program
+([`MicrobitUploader.py`](https://github.com/mjtroniks/Microbit/blob/main/MicrobitUploader.py)):
+it flashes your file with `uflash` and shows the robot's `print()` output over USB.
 
-The micro:bit has its own built-in `microbit` module, so the simulator files are not used there.
+![micro:bit Flasher + REPL](docs/uploader.png)
+
+*Example screen (values shown for illustration).*
+
+### 1. Install the tools (once)
+
+Open PyCharm's **Terminal** (it uses the project's virtual environment) and run:
+
+```
+python -m pip install uflash pyserial
+```
+
+On the university network, if pip fails with a certificate error (`SSL: CERTIFICATE_VERIFY_FAILED`), use:
+
+```
+python -m pip install uflash pyserial --trusted-host pypi.org --trusted-host files.pythonhosted.org
+```
+
+`uflash` and `pyserial` do not contain a `microbit` module, so they do not affect the simulator.
+
+### 2. Get the uploader and the lab material
+
+```
+git clone https://github.com/mjtroniks/Microbit.git
+git clone https://github.com/LSBU-Electronics-Lab/MicroPython.git
+```
+
+The first contains `MicrobitUploader.py`; the second contains the lab programs
+(instructions in the [lab wiki](https://github.com/LSBU-Electronics-Lab/MicroPython/wiki)).
+Without Git, use **Code → Download ZIP** on each GitHub page.
+
+### 3. Upload a program
+
+1. Put the robot on its **stand** so it cannot drive off the bench, and check the
+   ultrasonic sensor is plugged into **SR04** (not I2C).
+2. Connect the micro:bit by USB. It appears as a drive called **MICROBIT**.
+3. Start the uploader from the same Terminal: `python Microbit/MicrobitUploader.py`
+   (adjust the path to where you cloned it).
+4. **Browse…** to your `.py` file, check the **MICROBIT drive** (click **Refresh** if it is
+   empty) and click **Upload to micro:bit**. The orange LED on the back flashes; when it
+   stops, the program starts.
+5. To see `print()` output: choose the **Serial port** (usually *mbed Serial Port* /
+   *USB Serial Device*, e.g. `COM5`) and click **Connect**. **Interrupt (Ctrl+C)** stops the
+   program, **Enter REPL** gives a `>>>` prompt, **Soft Reset** restarts it.
+
+Notes:
+- The uploader finds the micro:bit by drive letter, so it works on **Windows**.
+- `uflash` must be installed in the same Python that runs the uploader; if it says
+  *"uflash is not installed"*, it prints the exact install command for that Python.
+- The serial connection is closed automatically before each upload; connect again afterwards.
+- `uflash` puts its own MicroPython on the micro:bit (for the V2 an early 2.0 release). If a
+  newer MicroPython feature is missing, flash from [python.microbit.org](https://python.microbit.org)
+  or with PyCharm's MicroPython plugin instead.
+- Robot drifting to one side? Measure it, then use the simulator's **Motors** tab to find
+  corrected speeds (see above).
 
 ## Troubleshooting
 
@@ -155,6 +211,9 @@ The micro:bit has its own built-in `microbit` module, so the simulator files are
 | Red underline under `microbit` but it runs | Right-click the project folder → **Mark Directory as → Sources Root**, or **File → Invalidate Caches**. |
 | No simulator window | Python lacks Tkinter: reinstall from python.org. See `cutebot_sim_window.log` in your temp folder. |
 | `TypeError` on motor speeds | Use whole numbers 0–100. |
+| Uploader: "No MICROBIT drive found" | Use a data USB cable, reconnect the micro:bit, click **Refresh**. The drive must show **MICROBIT** in File Explorer. |
+| Uploader: "pyserial not installed" / "uflash is not installed" | Run `python -m pip install uflash pyserial` with the Python that starts the uploader. |
+| Uploader: cannot connect to COM port | Close other programs using the port (PyCharm's MicroPython REPL, another uploader window) and try again. |
 | Strange import errors | Don't name your files `microbit.py`, `machine.py`, `utime.py` or `neopixel.py`. |
 
 ## Command line
