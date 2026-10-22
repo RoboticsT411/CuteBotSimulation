@@ -1061,7 +1061,7 @@ class SimWindow:
     def _current_pose(self):
         if self._preview_pose is not None:
             return self._preview_pose
-        if self.sh.get("owner_gen") > 0:
+        if getattr(self, "_published", False):
             return tuple(self.sh.get("pose"))
         return tuple(self.world.start)
 
@@ -1289,6 +1289,11 @@ class SimWindow:
             if not self.trail:
                 self.trail.append([])
             seg = self.trail[-1]
+            if seg and math.hypot(x - seg[-1][0], y - seg[-1][1]) > 5.0:
+                # The robot cannot move 5 cm in one frame: it was placed by hand or a
+                # new run started.  Start a new piece of trail instead of joining them.
+                seg = []
+                self.trail.append(seg)
             if not seg or math.hypot(x - seg[-1][0], y - seg[-1][1]) >= 0.4:
                 seg.append((x, y))
                 if len(seg) > 6000:
@@ -1388,10 +1393,20 @@ class SimWindow:
         has_prog = sh.get("owner_gen") > 0
 
         tick = sh.get("prog_tick")
+        gen = sh.get("owner_gen")
+        if gen != getattr(self, "_seen_gen", None):
+            # A new program has claimed the simulator. Its position is only valid
+            # once it has published at least once (until then the shared block still
+            # holds old or empty values such as x = 0, y = 0).
+            self._seen_gen = gen
+            self._gen_tick = tick
+            self.last_prog_tick = tick
         if tick != self.last_prog_tick:
             self.last_prog_tick = tick
             self.last_prog_change = now
-        live = has_prog and now - self.last_prog_change < STALE_S
+        published = has_prog and tick != self._gen_tick
+        self._published = published
+        live = published and now - self.last_prog_change < STALE_S
 
         # A pose set by the user is shown until the program has applied it.
         if live and self._preview_pose is not None and self.drag is None:
@@ -1402,15 +1417,15 @@ class SimWindow:
                 self._preview_pose = None
         if self._preview_pose is not None:
             pose = self._preview_pose
-        elif has_prog:
+        elif published:
             pose = tuple(sh.get("pose"))
         else:
             pose = tuple(self.world.start)
 
-        motors = sh.get("motors") if has_prog else [0.0, 0.0]
-        line = sh.get("line") if has_prog else [1, 1]
+        motors = sh.get("motors") if published else [0.0, 0.0]
+        line = sh.get("line") if published else [1, 1]
         self._update_robot(pose, sh.get("lights"), sh.get("neopixels"), line,
-                           sh.get("sonar_cm"), sh.get("sonar_active") and has_prog)
+                           sh.get("sonar_cm"), sh.get("sonar_active") and published)
 
         for i, v in enumerate(sh.get("display")):
             col = LED_OFF if v == 0 else _rgb(*_mix((255, 40, 30), (58, 20, 20), 0.25 + 0.75 * v / 9))
@@ -1440,7 +1455,7 @@ class SimWindow:
             actual = f"\n  actual   L {motors[0] * g[0]:+5.1f} %   R {motors[1] * g[1]:+5.1f} %"
         x, y = self.to_user(pose[0], pose[1])
         a = _wrap(-pose[2])
-        sonar = f"{sh.get('sonar_cm'):5.1f} cm" if sh.get("sonar_active") and has_prog else "  (not used)"
+        sonar = f"{sh.get('sonar_cm'):5.1f} cm" if sh.get("sonar_active") and published else "  (not used)"
         self.readout.configure(text=(
             f"Motors     L {motors[0]:+5.0f} %   R {motors[1]:+5.0f} %{actual}\n"
             f"Line       L {line[0]}   R {line[1]}   (0 = black)\n"
