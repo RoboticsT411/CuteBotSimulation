@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.idea/
+*.egg-info/
+build/
+dist/
+sim_layout.json
+sim_layout.json.tmp
+obstacles.json

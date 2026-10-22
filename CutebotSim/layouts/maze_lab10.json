@@ -1,0 +1,36 @@
+{
+ "format": "lsbu-cutebot-layout/1",
+ "units": "cm; origin bottom-left; y up; angle 0 = right, 90 = up; obstacle x,y = bottom-left corner",
+ "name": "Maze (Lab 10)",
+ "arena": {
+  "width": 122.0,
+  "height": 90.0
+ },
+ "line_width": 2.0,
+ "start": {
+  "x": 15.0,
+  "y": 12.0,
+  "angle": 90.0
+ },
+ "lines": [],
+ "obstacles": [
+  {
+   "x": 30.0,
+   "y": 30.0,
+   "width": 2.0,
+   "height": 60.0
+  },
+  {
+   "x": 61.0,
+   "y": 0.0,
+   "width": 2.0,
+   "height": 60.0
+  },
+  {
+   "x": 92.0,
+   "y": 30.0,
+   "width": 2.0,
+   "height": 60.0
+  }
+ ]
+}
