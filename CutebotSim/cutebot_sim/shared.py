@@ -14,7 +14,7 @@ import struct
 import sys
 from multiprocessing import shared_memory
 
-SHM_NAME = "lsbu_cutebot_sim_v3"
+SHM_NAME = "lsbu_cutebot_sim_v5"
 MAX_OBSTACLES = 40
 MAX_LINE_FLOATS = 24000   # x, y pairs; (NaN, NaN) separates strokes
 MAGIC = 0xC07EB070
@@ -31,6 +31,15 @@ _FIELDS = [
     ("btn_b_count", "I", 1),    # G
     ("pose_req_seq", "I", 1),   # G  bumped when the user drags/rotates/resets the robot
     ("pose_req", "f", 3),       # G  x, y (cm), heading (deg); NaN x = "go to start"
+    ("reset_req", "I", 1),      # G  bumped by the micro:bit RESET button
+    ("accel", "f", 3),          # G  accelerometer x, y, z (mg) from the tilt pad
+    ("pulse_seq", "I", 1),      # G  bumped for a shake / freefall / 3g pulse
+    ("pulse_name", "16s", 1),   # G  which pulse gesture
+    ("mic_level", "B", 1),      # G  microphone sound level 0..255
+    ("temp_c", "f", 1),         # G  temperature (deg C)
+    ("light", "B", 1),          # G  light level 0..255
+    ("sound_out", "B", 1),      # G  1 = play music on the PC speaker (Windows)
+    ("sensors_set", "B", 1),    # G  1 once the window has written the values above
     ("motor_gain", "f", 2),     # G  simulated motor strength, left/right (1.0 = exact)
     ("world_seq", "I", 1),      # G  seqlock: odd while the window is writing the world
     ("arena", "f", 2),          # G  width, height (cm)
@@ -44,6 +53,9 @@ _FIELDS = [
     ("owner_pid", "I", 1),      # P
     ("prog_tick", "I", 1),      # P  increments while the program's physics runs
     ("prog_state", "B", 1),     # P  see STATE_*
+    ("run_seq", "I", 1),        # P  bumped each time the program (re)starts after RESET
+    ("speaker_freq", "f", 1),   # P  note being played (Hz, 0 = none)
+    ("speaker_label", "32s", 1),  # P  what is being played (e.g. "C4" or "Sound.HAPPY")
     ("prog_name", "64s", 1),    # P  script file name
     ("message", "120s", 1),     # P  last error / status text
     ("pose", "f", 3),           # P  x, y (cm), heading (deg, 0 = facing right, 90 = facing down)

@@ -18,8 +18,8 @@ _rt = _runtime_mod.get()
 __all__ = [
     "Image", "display", "button_a", "button_b", "pin_logo", "pin_speaker",
     "i2c", "spi", "uart", "accelerometer", "compass", "microphone", "speaker",
-    "sleep", "running_time", "temperature", "panic", "reset", "set_volume",
-    "Sound", "SoundEvent",
+    "sleep", "running_time", "temperature", "panic", "reset", "set_volume", "scale",
+    "Sound", "SoundEvent", "audio",
 ] + [f"pin{n}" for n in (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 19, 20)]
 
 
@@ -37,7 +37,8 @@ def running_time():
 
 
 def temperature():
-    return 21
+    """Temperature in degrees Celsius (set in the simulator's Sensors tab)."""
+    return _rt.temperature()
 
 
 def panic(n=0):
@@ -46,15 +47,27 @@ def panic(n=0):
 
 
 def reset():
-    import os
-    import sys
+    """Restart the program (like pressing the micro:bit's reset button)."""
+    if _rt.shared is None:
+        import os
+        import sys
 
-    print("[cutebot-sim] reset() - restarting the program", flush=True)
-    os.execv(sys.executable, [sys.executable] + sys.argv)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    _rt.request_reset()
+
+
+def scale(value, from_, to):
+    """Convert ``value`` from the range ``from_`` (a tuple) to the range ``to``.
+    Returns an int if ``to`` uses ints, else a float."""
+    (a, b), (c, d) = from_, to
+    result = c + (value - a) * (d - c) / (b - a)
+    return int(round(result)) if isinstance(c, int) and isinstance(d, int) else result
 
 
 def set_volume(v):
-    pass
+    """Speaker volume 0-255 (the simulator does not change the PC volume)."""
+    if not 0 <= v <= 255:
+        raise ValueError("volume must be 0..255")
 
 
 # --- display ----------------------------------------------------------------------
@@ -197,22 +210,213 @@ class _Stub:
 
 spi = _Stub("spi")
 uart = _Stub("uart", read=None, readline=None, any=False)
-accelerometer = _Stub("accelerometer", get_x=0, get_y=0, get_z=-1024, get_values=(0, 0, -1024),
-                      get_strength=1024, current_gesture="face up", is_gesture=False,
-                      was_gesture=False, get_gestures=())
-compass = _Stub("compass", heading=0, is_calibrated=True, get_x=0, get_y=0, get_z=0,
-                get_field_strength=0)
-microphone = _Stub("microphone", sound_level=0, current_event=None, was_event=False,
-                   is_event=False, get_events=())
-speaker = _Stub("speaker", is_on=False)
+import math as _math  # noqa: E402
+import threading as _threading  # noqa: E402
+
+from cutebot_sim import sensors as _sensors  # noqa: E402
+
+
+# --- accelerometer (tilt pad in the simulator's Sensors tab) -------------------------
+class _Accelerometer:
+    def get_x(self):
+        """Acceleration along x (left/right tilt) in milli-g."""
+        return _rt.accel()[0]
+
+    def get_y(self):
+        """Acceleration along y (logo up/down tilt) in milli-g."""
+        return _rt.accel()[1]
+
+    def get_z(self):
+        """Acceleration along z (face up = -1024, face down = +1024) in milli-g."""
+        return _rt.accel()[2]
+
+    def get_values(self):
+        """(x, y, z) in milli-g."""
+        return tuple(_rt.accel())
+
+    def get_strength(self):
+        """Total acceleration in milli-g (about 1024 when still)."""
+        x, y, z = _rt.accel()
+        return int(round(_math.sqrt(x * x + y * y + z * z)))
+
+    def current_gesture(self):
+        """The current gesture: 'up', 'down', 'left', 'right', 'face up', 'face down',
+        'freefall', '3g', '6g', '8g' or 'shake'."""
+        return _rt.current_gesture()
+
+    def is_gesture(self, name):
+        """True if ``name`` is the current gesture."""
+        _check_gesture(name)
+        return _rt.current_gesture() == name
+
+    def was_gesture(self, name):
+        """True if ``name`` happened since the last call to was_gesture(name)."""
+        _check_gesture(name)
+        if name in _rt.gesture_flags:
+            _rt.gesture_flags.discard(name)
+            return True
+        return False
+
+    def get_gestures(self):
+        """Gestures since the last call, oldest first (the list is then cleared)."""
+        h = tuple(_rt.gesture_history)
+        _rt.gesture_history.clear()
+        return h
+
+    def set_range(self, value):
+        self._range = value
+
+
+def _check_gesture(name):
+    if name not in _sensors.GESTURES:
+        raise ValueError(f"invalid gesture: {name!r}")
+
+
+accelerometer = _Accelerometer()
+
+
+# --- compass: the robot's heading in the arena (north = up) ---------------------------
+class _Compass:
+    def heading(self):
+        """Direction the robot faces, 0-359 degrees clockwise from north (up in the arena)."""
+        hdeg = _rt.robot.heading * 57.29577951308232       # internal: 0 = east, clockwise
+        return int(round(hdeg + 90.0)) % 360
+
+    def calibrate(self):
+        pass
+
+    def is_calibrated(self):
+        return True
+
+    def clear_calibration(self):
+        pass
+
+    def _field(self):
+        h = _math.radians(self.heading())
+        return (int(-30000 * _math.sin(h)), int(30000 * _math.cos(h)), -40000)
+
+    def get_x(self):
+        return self._field()[0]
+
+    def get_y(self):
+        return self._field()[1]
+
+    def get_z(self):
+        return self._field()[2]
+
+    def get_field_strength(self):
+        return 50000
+
+
+compass = _Compass()
+
+
+# --- microphone (V2): sound-level slider and Clap button in the Sensors tab -----------
+class SoundEvent:
+    """Microphone events: SoundEvent.LOUD and SoundEvent.QUIET."""
+
+    def __init__(self, name):
+        self._name = name
+
+    def __repr__(self):
+        return f"SoundEvent('{self._name}')"
+
+
+SoundEvent.LOUD = SoundEvent("loud")
+SoundEvent.QUIET = SoundEvent("quiet")
+_EVENTS = {"loud": SoundEvent.LOUD, "quiet": SoundEvent.QUIET}
+
+
+class _Microphone:
+    def sound_level(self):
+        """Sound level 0 (silent) to 255 (very loud)."""
+        return _rt.sound_level()
+
+    def current_event(self):
+        """SoundEvent.LOUD or SoundEvent.QUIET."""
+        return _EVENTS[_rt.sound_event_now]
+
+    def is_event(self, event):
+        return self.current_event() is event
+
+    def was_event(self, event):
+        """True if ``event`` happened since the last call to was_event(event)."""
+        if event._name in _rt.sound_flags:
+            _rt.sound_flags.discard(event._name)
+            return True
+        return False
+
+    def get_events(self):
+        h = tuple(_EVENTS[n] for n in _rt.sound_history)
+        _rt.sound_history.clear()
+        return h
+
+    def set_threshold(self, event, value):
+        """Level (0-255) above which LOUD / below which QUIET is reported."""
+        if event is SoundEvent.LOUD:
+            _rt.loud_threshold = int(value)
+        else:
+            _rt.quiet_threshold = int(value)
+
+
+microphone = _Microphone()
+
+
+# --- speaker and sound expressions (V2) ----------------------------------------------
+class _Speaker:
+    def on(self):
+        _rt.speaker_on = True
+
+    def off(self):
+        _rt.speaker_on = False
+
+    def is_on(self):
+        return _rt.speaker_on
+
+
+speaker = _Speaker()
 
 
 class Sound:
-    GIGGLE = HAPPY = HELLO = MYSTERIOUS = SAD = SLIDE = SOARING = SPRING = TWINKLE = YAWN = None
+    """Built-in sound expressions (V2), used with audio.play(Sound.HAPPY)."""
+
+    def __init__(self, name):
+        self._name = name
+
+    def __repr__(self):
+        return f"Sound.{self._name}"
 
 
-class SoundEvent:
-    LOUD, QUIET = "loud", "quiet"
+for _sname in ("GIGGLE", "HAPPY", "HELLO", "MYSTERIOUS", "SAD", "SLIDE", "SOARING", "SPRING",
+               "TWINKLE", "YAWN"):
+    setattr(Sound, _sname, Sound(_sname))
+
+
+class _Audio:
+    """``audio.play(Sound.HAPPY)``: shown on the simulator's speaker indicator (about 1 s)."""
+
+    def __init__(self):
+        self._until = 0.0
+
+    def play(self, source, wait=True, pin=None, return_pin=None):
+        label = repr(source) if isinstance(source, Sound) else "audio"
+        _rt.set_speaker(0, label)
+        self._until = _time.perf_counter() + 1.0
+        if wait:
+            _time.sleep(1.0)
+            _rt.set_speaker(0, "")
+        else:
+            _threading.Timer(1.0, lambda: _rt.set_speaker(0, "")).start()
+
+    def is_playing(self):
+        return _time.perf_counter() < self._until
+
+    def stop(self):
+        self._until = 0.0
+        _rt.set_speaker(0, "")
+
+
+audio = _Audio()
 
 
 # MicroPython's ``time`` also has these; add them to PC Python's ``time`` so

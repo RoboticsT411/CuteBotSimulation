@@ -19,7 +19,7 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from . import maps, robot as R, shared
+from . import maps, reference, robot as R, sensors, shared
 
 FRAME_MS = 16
 PANEL_W = 340
@@ -53,8 +53,8 @@ MODE_HINT = {
     "erase": "Drag over a line to erase it.  Click an obstacle to delete it.",
     "box": "Drag a rectangle to create an obstacle.",
 }
-HELP = ("Keys 1-4: tools   Q/E or wheel: rotate 15° (Shift 1°)\n"
-        "A/B: micro:bit buttons   Delete key / right-click: delete obstacle")
+HELP = ("Keys 1-4: tools   Q/E or wheel: rotate 15° (Shift 1°)   R: RESET\n"
+        "A/B: micro:bit buttons   Delete / right-click: delete obstacle   F1: help")
 
 
 def _rgb(r, g, b):
@@ -133,6 +133,9 @@ class SimWindow:
                            selectcolor="#1F6FEB", activebackground="#3A424D",
                            activeforeground=TEXT, relief="flat", padx=10, pady=4,
                            bd=0, highlightthickness=0).pack(side="left", padx=(0, 4))
+        tk.Button(bar, text="?  micro:bit help (F1)", command=self.open_help, bg="#2D333B", fg=TEXT,
+                  activebackground="#3A424D", activeforeground=TEXT, relief="flat", padx=10, pady=4,
+                  bd=0, highlightthickness=0).pack(side="right", padx=(8, 0))
         self.coord_label = tk.Label(bar, text="", bg=BG, fg=TEXT, font=("Consolas", 11, "bold"))
         self.coord_label.pack(side="right")
         self.hint = tk.Label(left, text=MODE_HINT["move"], bg=BG, fg=MUTED, anchor="w",
@@ -169,6 +172,7 @@ class SimWindow:
         self._build_motor_tab()
         self._build_obstacle_tab()
         self._build_arena_tab()
+        self._build_sensor_tab()
 
         tk.Label(panel, text=HELP, bg=PANEL_BG, fg=MUTED, justify="left", anchor="w",
                  font=("Segoe UI", 8)).pack(fill="x", padx=10, pady=(0, 8))
@@ -187,10 +191,13 @@ class SimWindow:
         c.bind("<Button-5>", lambda e: self._rotate_ccw(-self._step(e)))
         root.bind("<KeyPress>", self._on_key_down)
         root.bind("<KeyRelease>", self._on_key_up)
+        root.bind("<F1>", lambda e: self.open_help())
+        self._help = None
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._world_changed(save=False)
         self._publish_gain()
+        self._publish_sensors()
         self._tick()
 
     # =====================================================================================
@@ -227,6 +234,17 @@ class SimWindow:
         w = PANEL_W - 20
         b.create_rectangle(4, 4, w - 4, 176, fill="#111418", outline="#3C444D", width=2)
         b.create_text(w / 2, 18, text="micro:bit", fill=MUTED, font=("Segoe UI", 10, "bold"))
+        # RESET button (top right of the board): restarts the running program
+        rx0, ry0, rx1, ry1 = w - 62, 9, w - 12, 29
+        self.reset_btn = b.create_rectangle(rx0, ry0, rx1, ry1, fill="#3A2A2A", outline="#8B4A4A",
+                                            width=1)
+        reset_txt = b.create_text((rx0 + rx1) / 2, (ry0 + ry1) / 2, text="RESET", fill="#F2B8B5",
+                                  font=("Segoe UI", 8, "bold"))
+        for item in (self.reset_btn, reset_txt):
+            b.tag_bind(item, "<ButtonPress-1>", lambda e: self._press_reset(True))
+            b.tag_bind(item, "<ButtonRelease-1>", lambda e: self._press_reset(False))
+            b.tag_bind(item, "<Enter>", lambda e: b.configure(cursor="hand2"))
+            b.tag_bind(item, "<Leave>", lambda e: b.configure(cursor=""))
         self.leds = []
         size, gap = 19, 10
         gx = (w - (5 * size + 4 * gap)) / 2
@@ -244,6 +262,14 @@ class SimWindow:
             self.btn_items[name] = oval
             b.tag_bind(oval, "<ButtonPress-1>", lambda e, n=name: self._button(n, True))
             b.tag_bind(oval, "<ButtonRelease-1>", lambda e, n=name: self._button(n, False))
+
+    def _press_reset(self, down):
+        """RESET restarts the program (like the micro:bit's reset button)."""
+        self.board.itemconfigure(self.reset_btn, fill="#6B2E2E" if down else "#3A2A2A")
+        if down:
+            if self.sh.get("owner_gen") == 0:
+                return
+            self.sh.bump("reset_req")
 
     def _button(self, name, down):
         key = f"btn_{name}_down"
@@ -1103,6 +1129,9 @@ class SimWindow:
             if k not in self.keys_down:
                 self.keys_down.add(k)
                 self._button(k, True)
+        elif k == "r":
+            self._press_reset(True)
+            self.root.after(120, lambda: self._press_reset(False))
         elif k in ("q", "e"):
             self._rotate_ccw(self._step(e) * (1 if k == "q" else -1))
         elif k in ("1", "2", "3", "4"):
@@ -1269,8 +1298,8 @@ class SimWindow:
         self._draw_trail(full=True)
 
     def _update_trail(self, has_prog, live, pose, motors=(0.0, 0.0)):
-        gen = self.sh.get("owner_gen")
-        if gen != self._run_gen:                 # a new program run starts a new trail
+        gen = (self.sh.get("owner_gen"), self.sh.get("run_seq"))
+        if gen != self._run_gen:                 # a new run (or RESET) starts a new trail
             self._run_gen = gen
             self.trail = []
             self._run_start = None
@@ -1386,6 +1415,148 @@ class SimWindow:
                 f"To go straight try:\n  " + "\n  ".join(options))
 
     # =====================================================================================
+    # Sensors tab: accelerometer (tilt pad), microphone, speaker, temperature, light
+    # =====================================================================================
+    PAD = 116
+
+    def _build_sensor_tab(self):
+        f = self._tab("Sensors")
+        self.tilt = [0.0, 0.0]          # roll (right edge down +), pitch (logo edge down +), deg
+        self.face_down = False
+
+        tk.Label(f, text="Tilt the micro:bit: drag the dot (it rolls downhill)",
+                 bg=PANEL_BG, fg=MUTED, anchor="w").pack(fill="x", padx=6, pady=(6, 2))
+        row = tk.Frame(f, bg=PANEL_BG)
+        row.pack(fill="x", padx=6)
+        P = self.PAD
+        pad = self.pad = tk.Canvas(row, width=P, height=P, bg=FIELD_BG, highlightthickness=1,
+                                   highlightbackground="#3A424D", cursor="hand2")
+        pad.pack(side="left")
+        pad.create_rectangle(8, 8, P - 8, P - 8, outline="#3A424D")
+        pad.create_line(P / 2, 8, P / 2, P - 8, fill="#2A3038")
+        pad.create_line(8, P / 2, P - 8, P / 2, fill="#2A3038")
+        pad.create_text(P / 2, 15, text="logo", fill=MUTED, font=("Segoe UI", 7))
+        self.pad_dot = pad.create_oval(0, 0, 0, 0, fill="#1F6FEB", outline="#9CDCFE")
+        for ev in ("<ButtonPress-1>", "<B1-Motion>"):
+            pad.bind(ev, self._on_pad)
+        pad.bind("<Double-Button-1>", lambda e: self._set_tilt(0, 0, False))
+
+        btns = tk.Frame(row, bg=PANEL_BG)
+        btns.pack(side="left", fill="y", padx=(8, 0))
+        for text, cmd in (("Flat", lambda: self._set_tilt(0, 0, False)),
+                          ("Face down", lambda: self._set_tilt(0, 0, True)),
+                          ("Logo up", lambda: self._set_tilt(0, -90, False)),
+                          ("Shake", lambda: self._pulse("shake")),
+                          ("Freefall", lambda: self._pulse("freefall"))):
+            self._btn(btns, text, cmd).pack(fill="x", pady=1)
+        self.accel_label = tk.Label(f, text="", bg=PANEL_BG, fg=TEXT, font=("Consolas", 9),
+                                    anchor="w", justify="left")
+        self.accel_label.pack(fill="x", padx=6, pady=(2, 4))
+
+        tk.Frame(f, bg="#3A424D", height=1).pack(fill="x", padx=6, pady=2)
+        row = tk.Frame(f, bg=PANEL_BG)
+        row.pack(fill="x", padx=6)
+        tk.Label(row, text="Microphone", bg=PANEL_BG, fg=MUTED).pack(side="left")
+        self.mic_var = tk.IntVar(value=0)
+        tk.Scale(row, from_=0, to=255, orient="horizontal", variable=self.mic_var, length=140,
+                 showvalue=True, bg=PANEL_BG, fg=TEXT, troughcolor=FIELD_BG, highlightthickness=0,
+                 bd=0, command=lambda v: self._publish_sensors()).pack(side="left", padx=4)
+        self._btn(row, "Clap", self._clap).pack(side="left")
+
+        row = tk.Frame(f, bg=PANEL_BG)
+        row.pack(fill="x", padx=6, pady=(2, 0))
+        self.speaker_label = tk.Label(row, text="\u266a  silent", bg=PANEL_BG, fg=MUTED,
+                                      font=("Segoe UI", 10, "bold"), anchor="w", width=14)
+        self.speaker_label.pack(side="left")
+        self.sound_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(row, text="Play sounds on this PC", variable=self.sound_var,
+                       command=self._publish_sensors, bg=PANEL_BG, fg=TEXT, selectcolor=FIELD_BG,
+                       activebackground=PANEL_BG, activeforeground=TEXT).pack(side="left")
+
+        tk.Frame(f, bg="#3A424D", height=1).pack(fill="x", padx=6, pady=3)
+        row = tk.Frame(f, bg=PANEL_BG)
+        row.pack(fill="x", padx=6)
+        self.temp_var = tk.IntVar(value=21)
+        self.light_var = tk.IntVar(value=128)
+        for label, var, lo, hi in (("Temp \u00b0C", self.temp_var, -10, 50),
+                                   ("Light", self.light_var, 0, 255)):
+            tk.Label(row, text=label, bg=PANEL_BG, fg=MUTED).pack(side="left")
+            tk.Scale(row, from_=lo, to=hi, orient="horizontal", variable=var, length=88,
+                     showvalue=True, bg=PANEL_BG, fg=TEXT, troughcolor=FIELD_BG,
+                     highlightthickness=0, bd=0,
+                     command=lambda v: self._publish_sensors()).pack(side="left", padx=(2, 6))
+        self._mic_clap_until = 0.0
+        self._draw_pad()
+
+    def _on_pad(self, e):
+        P = self.PAD
+        r = (P - 16) / 2.0
+        dx = max(-1.0, min(1.0, (e.x - P / 2) / r))
+        dy = max(-1.0, min(1.0, (e.y - P / 2) / r))
+        self._set_tilt(dx * 90.0, -dy * 90.0, False)
+
+    def _set_tilt(self, roll, pitch, face_down):
+        self.tilt = [roll, pitch]
+        self.face_down = face_down
+        self._draw_pad()
+        self._publish_sensors()
+
+    def _draw_pad(self):
+        P = self.PAD
+        r = (P - 16) / 2.0
+        cx = P / 2 + self.tilt[0] / 90.0 * r
+        cy = P / 2 - self.tilt[1] / 90.0 * r
+        d = 7
+        self.pad.coords(self.pad_dot, cx - d, cy - d, cx + d, cy + d)
+        self.pad.itemconfigure(self.pad_dot, fill="#8B4A4A" if self.face_down else "#1F6FEB")
+        x, y, z = sensors.accel_from_tilt(self.tilt[0], self.tilt[1], self.face_down)
+        g = sensors.gesture_from_accel(x, y, z) or "-"
+        self.accel_label.configure(text=f"x {x:+6.0f}  y {y:+6.0f}  z {z:+6.0f} mg\n"
+                                        f"gesture: {g}" + ("   (face down)" if self.face_down else ""))
+
+    def _pulse(self, name):
+        self.sh.set("pulse_name", name)
+        self.sh.bump("pulse_seq")
+        self.accel_label.configure(text=self.accel_label.cget("text").split("\n")[0]
+                                   + f"\ngesture: {name}!")
+        self.root.after(700, self._draw_pad)
+
+    def _clap(self):
+        self._mic_clap_until = time.time() + 0.35
+        self._publish_sensors()
+        self.root.after(400, self._publish_sensors)
+
+    def _publish_sensors(self):
+        sh = self.sh
+        sh.set("accel", sensors.accel_from_tilt(self.tilt[0], self.tilt[1], self.face_down))
+        level = 255 if time.time() < self._mic_clap_until else int(self.mic_var.get())
+        sh.set("mic_level", level)
+        sh.set("temp_c", float(self.temp_var.get()))
+        sh.set("light", int(self.light_var.get()))
+        sh.set("sound_out", 1 if self.sound_var.get() else 0)
+        sh.set("sensors_set", 1)
+
+    def _update_speaker(self, published):
+        label = self.sh.get("speaker_label") if published else ""
+        freq = self.sh.get("speaker_freq") if published else 0.0
+        if label and label != "rest":
+            text = f"\u266a  {label}" + (f"  {freq:.0f} Hz" if freq and "Hz" not in label else "")
+            self.speaker_label.configure(text=text, fg="#3FB950")
+        else:
+            self.speaker_label.configure(text="\u266a  silent", fg=MUTED)
+
+    # =====================================================================================
+    # micro:bit reference (Help window)
+    # =====================================================================================
+    def open_help(self, query=""):
+        if self._help is not None and self._help.top.winfo_exists():
+            self._help.top.deiconify()
+            self._help.top.lift()
+            self._help.entry.focus_set()
+            return
+        self._help = HelpWindow(self.root)
+
+    # =====================================================================================
     # frame loop
     # =====================================================================================
     def _tick(self):
@@ -1455,9 +1626,11 @@ class SimWindow:
                             "or Stop was pressed)"), "#D29922"
         elif state == shared.STATE_FINISHED:
             extra = "  - motors still on" if live and any(abs(m) > 0 for m in motors) else ""
-            text, colour = f"Finished  {name}{extra}", ACCENT
+            text, colour = f"Finished  {name}{extra}\nPress RESET (or R) to run it again", ACCENT
+            if not live:
+                text = f"Finished  {name}"
         else:
-            text, colour = f"Error in  {name}", ERR
+            text, colour = f"Error in  {name}" + ("\nFix it, or press RESET to run again" if live else ""), ERR
         self.status.configure(text=text, fg=colour)
         self.message.configure(text=sh.get("message") if state == shared.STATE_ERROR else "")
 
@@ -1466,6 +1639,7 @@ class SimWindow:
         wheels = f"Wheels     L {wheel_v[0] * pct:+5.1f} %   R {wheel_v[1] * pct:+5.1f} %   (real)\n"
         if self.gain_hidden:
             wheels = "Wheels     hidden mismatch (Motors tab)\n"
+        self._update_speaker(published)
         x, y = self.to_user(pose[0], pose[1])
         a = _wrap(-pose[2])
         sonar = f"{sh.get('sonar_cm'):5.1f} cm" if sh.get("sonar_active") and published else "  (not used)"
@@ -1483,6 +1657,119 @@ class SimWindow:
             if not hasattr(self, "_arena_filled"):
                 self._arena_filled = True
                 self._fill_arena_fields()
+
+
+class HelpWindow:
+    """Searchable quick reference for the micro:bit API and the Cutebot."""
+
+    def __init__(self, root):
+        import webbrowser
+
+        self._web = webbrowser
+        top = self.top = tk.Toplevel(root)
+        top.title("micro:bit MicroPython reference")
+        top.configure(bg=PANEL_BG)
+        top.geometry("900x560")
+        top.minsize(640, 380)
+
+        head = tk.Frame(top, bg=PANEL_BG)
+        head.pack(fill="x", padx=12, pady=(12, 6))
+        tk.Label(head, text="Search", bg=PANEL_BG, fg=MUTED).pack(side="left")
+        self.query = tk.StringVar()
+        self.entry = tk.Entry(head, textvariable=self.query, bg=FIELD_BG, fg=TEXT,
+                              insertbackground=TEXT, relief="flat", font=("Segoe UI", 11))
+        self.entry.pack(side="left", fill="x", expand=True, padx=8, ipady=4)
+        self.query.trace_add("write", lambda *a: self._filter())
+        tk.Label(head, text="e.g. display, button, motor, line, sleep", bg=PANEL_BG,
+                 fg=MUTED).pack(side="left")
+
+        body = tk.Frame(top, bg=PANEL_BG)
+        body.pack(fill="both", expand=True, padx=12)
+        self.listbox = tk.Listbox(body, width=30, bg=FIELD_BG, fg=TEXT, relief="flat",
+                                  selectbackground="#1F6FEB", font=("Consolas", 10),
+                                  activestyle="none", exportselection=False)
+        self.listbox.pack(side="left", fill="y")
+        self.listbox.bind("<<ListboxSelect>>", lambda e: self._show_selected())
+        right = tk.Frame(body, bg=PANEL_BG)
+        right.pack(side="left", fill="both", expand=True, padx=(12, 0))
+        self.text = tk.Text(right, bg=FIELD_BG, fg=TEXT, relief="flat", wrap="word",
+                            font=("Segoe UI", 10), padx=12, pady=10, cursor="arrow")
+        self.text.pack(fill="both", expand=True)
+        t = self.text
+        t.tag_configure("title", font=("Segoe UI", 14, "bold"), foreground="#FFFFFF")
+        t.tag_configure("sig", font=("Consolas", 10), foreground="#9CDCFE")
+        t.tag_configure("yes", foreground=OK, font=("Segoe UI", 9, "bold"))
+        t.tag_configure("part", foreground="#D29922", font=("Segoe UI", 9, "bold"))
+        t.tag_configure("no", foreground=ERR, font=("Segoe UI", 9, "bold"))
+        t.tag_configure("head", font=("Segoe UI", 10, "bold"), foreground=MUTED)
+        t.tag_configure("code", font=("Consolas", 10), background="#14181D", foreground="#D7E3EF",
+                        lmargin1=8, lmargin2=8)
+
+        btns = tk.Frame(right, bg=PANEL_BG)
+        btns.pack(fill="x", pady=8)
+
+        def mk(text, cmd):
+            return tk.Button(btns, text=text, command=cmd, bg="#33404D", fg=TEXT,
+                             activebackground="#40505F", activeforeground=TEXT, relief="flat",
+                             padx=10, pady=3)
+
+        mk("Copy example", self._copy).pack(side="left")
+        mk("Open full documentation (V2)", self._open_doc).pack(side="left", padx=6)
+        mk("All micro:bit docs", lambda: self._web.open(reference.DOCS_HOME)).pack(side="right")
+        self.msg = tk.Label(right, text="", bg=PANEL_BG, fg=MUTED, anchor="w")
+        self.msg.pack(fill="x")
+
+        self.results = []
+        self._filter()
+        self.entry.focus_set()
+        top.bind("<Escape>", lambda e: top.destroy())
+
+    def _filter(self):
+        self.results = reference.search(self.query.get())
+        self.listbox.delete(0, "end")
+        for e in self.results:
+            self.listbox.insert("end", e["name"])
+        if self.results:
+            self.listbox.selection_set(0)
+            self._show(self.results[0])
+        else:
+            self._show(None)
+
+    def _show_selected(self):
+        sel = self.listbox.curselection()
+        if sel:
+            self._show(self.results[sel[0]])
+
+    def _show(self, e):
+        self.current = e
+        t = self.text
+        t.configure(state="normal")
+        t.delete("1.0", "end")
+        if e is None:
+            t.insert("end", "Nothing found.\n\n", "title")
+            t.insert("end", "Try another word, or press 'All micro:bit docs'.")
+        else:
+            sim = e["sim"]
+            tag = "yes" if sim.startswith(reference.YES) else "no" if sim.startswith(reference.NO) else "part"
+            t.insert("end", e["name"] + "\n", "title")
+            t.insert("end", e["signature"] + "\n\n", "sig")
+            t.insert("end", "In the simulator: " + sim + "\n\n", tag)
+            t.insert("end", e["summary"] + "\n\n")
+            t.insert("end", "Example\n", "head")
+            t.insert("end", e["example"] + "\n", "code")
+        t.configure(state="disabled")
+        self.msg.configure(text="")
+
+    def _copy(self):
+        if self.current:
+            self.top.clipboard_clear()
+            self.top.clipboard_append(self.current["example"])
+            self.msg.configure(text="Example copied - paste it into PyCharm.", fg=OK)
+
+    def _open_doc(self):
+        if self.current:
+            self._web.open(self.current["url"])
+            self.msg.configure(text="Opened in your web browser.", fg=OK)
 
 
 def main():

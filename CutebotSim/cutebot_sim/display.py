@@ -224,7 +224,8 @@ class Display:
         return self._on
 
     def read_light_level(self):
-        return 128
+        """Light level 0-255 (set in the simulator's Sensors tab)."""
+        return self._rt.light_level()
 
     # --- animations -------------------------------------------------------------------
     def _cancel(self):

@@ -1,183 +1,335 @@
-# Cutebot Simulator for PyCharm (LSBU)
+# Cutebot Simulator for PyCharm
 
-Run micro:bit MicroPython programs for the Elecfreaks **Cutebot** on a PC, inside
-PyCharm, with no hardware. The same file can then be flashed to the real robot
-unchanged.
+Write micro:bit **MicroPython** for the Elecfreaks **Cutebot** in PyCharm, press **Run**,
+and watch the robot drive in a simulator window: no hardware needed. The same file can
+then be flashed to a real Cutebot **without any changes**.
 
-It was written for the LSBU MicroPython labs
-(https://github.com/LSBU-Electronics-Lab/MicroPython/wiki). Labs 1-9 run
-unmodified.
+Made for the [LSBU MicroPython labs](https://github.com/LSBU-Electronics-Lab/MicroPython/wiki)
+(T411 Robotics Laboratory, London South Bank University). All complete programs from
+Labs 1–9 run unmodified; Lab 10 has a ready-made maze.
 
-![window](docs/window.png)
+![Cutebot simulator window](Docs/window.png)
+
+## Features
+
+- Real micro:bit API: `from microbit import *` works exactly as on the board
+  (display, buttons, pins, I2C, `utime`, `machine`, `neopixel`, `music`).
+- Simulated Cutebot: motors, headlights, line sensors, ultrasonic sensor, NeoPixels,
+  at the real robot's size (8.5 × 8.5 cm).
+- Sensors: tilt the micro:bit, shake it, clap at the microphone, hear music, set temperature and light.
+- Arena editor: set the size in cm, draw and erase black lines, add and move obstacles,
+  save and share layouts as `.json` files.
+- Motor mismatch: make one wheel weaker, like a real robot, and get a suggested speed
+  correction to drive straight.
+- Debugging: breakpoints pause the robot too, so you can inspect sensor values.
+- RESET button on the simulated micro:bit restarts your program, like the real one.
+- Built-in micro:bit reference: search any function (e.g. `display`, `motor`, `sleep`) and
+  open its page in the official V2 documentation.
+- Real hardware: upload the same file to a Cutebot with the micro:bit Flasher + REPL tool.
+- Standard library only: nothing to `pip install`.
 
 ## What is simulated
 
-| Hardware | How your code uses it | Simulated |
+| Hardware | How your code uses it | Notes |
 |---|---|---|
-| 5x5 LED display | `display.show / scroll / set_pixel`, `Image` | yes, with the real micro:bit font and built-in images |
+| 5×5 LED display | `display.show / scroll / set_pixel`, `Image` | real micro:bit font and built-in images |
 | Buttons A and B | `button_a.is_pressed()`, `was_pressed()`, `get_presses()` | click them or press the **A** / **B** keys |
-| Motors | `i2c.write(0x10, [0x01 or 0x02, dir, speed, 0])` | yes (Elecfreaks mapping: **0x01 = left, 0x02 = right**; dir 0x02 = forward, 0x01 = backward) |
-| Headlights | `i2c.write(0x10, [0x04 or 0x08, R, G, B])` | yes |
-| Line sensors | `pin13` (left), `pin14` (right) `.read_digital()` | yes: **0 over the black line, 1 over white** |
-| Ultrasonic sensor | trigger `pin8`, echo `pin12`, or `machine.time_pulse_us` | yes, against walls and obstacles |
-| NeoPixels | `neopixel.NeoPixel(pin15, 2)` | yes (shown as underglow) |
-| Timing | `sleep`, `running_time`, `utime.*`, `time.*` | yes, real time |
-| Accelerometer, compass, sound, radio | | placeholders only (not simulated yet) |
+| Motors | `i2c.write(0x10, bytearray([0x01 or 0x02, dir, speed, 0]))` | Elecfreaks mapping: **0x01 = left, 0x02 = right**; dir 0x02 = forward, 0x01 = backward; speed 0–100 (whole numbers) |
+| Headlights | `i2c.write(0x10, bytearray([0x04 or 0x08, R, G, B]))` | 0x04 = left, 0x08 = right |
+| Line sensors | `pin13` (left), `pin14` (right) `.read_digital()` | **0 over the black line, 1 over white** |
+| Ultrasonic sensor | trigger `pin8`, echo `pin12`, or `machine.time_pulse_us` | measures to walls and obstacles |
+| NeoPixels | `neopixel.NeoPixel(pin15, 2)` | shown as underglow |
+| Timing | `sleep`, `running_time`, `utime.*`, `time.sleep_ms` … | real time |
+| Accelerometer | `accelerometer.get_x/y/z()`, `current_gesture()`, `was_gesture('shake')` | tilt pad and gesture buttons in the **Sensors** tab |
+| Microphone (V2) | `microphone.sound_level()`, `was_event(SoundEvent.LOUD)` | level slider and **Clap** button |
+| Speaker / music | `music.play(...)`, `music.pitch(...)`, `audio.play(Sound.HAPPY)` | note shown on screen; real beeps on Windows if enabled |
+| Compass | `compass.heading()` | the robot's heading (north = top of the arena) |
+| Temperature, light | `temperature()`, `display.read_light_level()` | sliders |
+| Radio, Bluetooth | | not simulated |
 
-## Setup (once per PC)
+## Quick start
 
-1. Install Python 3.9 or newer from python.org. Keep the default **tcl/tk and IDLE**
-   option ticked, because the simulator window uses Tkinter. Nothing else needs
-   installing: the simulator only uses the Python standard library.
-2. In PyCharm: **File > Open...** and choose this `CutebotSim` folder.
-3. When PyCharm asks for an interpreter, create a virtual environment (any
-   Python 3.9+ works).
-4. **Run `install_simulator.py` once** (right-click it > Run). This lets
-   `from microbit import *` work from any folder. Run it again if you make a
-   new virtual environment.
+### 1. Install Python, PyCharm and Git
 
-Put your own programs in the `labs` folder (right-click `labs` > New > Python File).
+| Software | Download | Notes |
+|---|---|---|
+| **Python 3.9+** (required) | [python.org/downloads](https://www.python.org/downloads/) | PyCharm does **not** include Python. Windows: run the *Python install manager* and click **Install**. Linux: `sudo apt install python3 python3-venv python3-tk` |
+| **PyCharm** | [jetbrains.com/pycharm/download](https://www.jetbrains.com/pycharm/download/) | One unified PyCharm; its free core features are all you need |
+| **Git** (optional) | [git-scm.com/downloads](https://git-scm.com/downloads) | Needed to clone and to pull updates |
 
-## Running a program in the simulator
+Check that Python includes Tkinter (the simulator window needs it):
 
-1. Open a file, e.g. `examples/03_line_follow.py`.
-2. Right-click in the editor, then **Run '03_line_follow'** (the normal green
-   Run button).
-3. The simulator window opens. Choose the track in the **Track** box.
+```
+python -c "import tkinter; print('Python and Tkinter OK')"
+```
 
-Notes:
-* Your own lab files go in `labs/`. If you get
-  `ModuleNotFoundError: No module named 'microbit'`, you have not run
-  `install_simulator.py` with this interpreter yet.
-* **Do not install `microbit`, `microbit-stubs`, `microbit-dummy` (or similar) with
-  pip / PyCharm's package manager.** They contain empty look-alike `microbit`,
-  `machine` and `neopixel` modules; programs would then run without doing anything.
-  `install_simulator.py` makes the simulator take priority anyway and warns if one
-  is installed. PyCharm's code completion already works from the simulator itself.
-* Do not name your own files `microbit.py`, `utime.py`, `machine.py` or
-  `neopixel.py`: they would hide the simulator's modules.
-* The window stays open between runs. Running again is like re-flashing the
-  micro:bit: the new program takes over and the robot goes back to its start
-  position.
-* Drag the robot with the mouse to place it. Rotate it with the mouse wheel or
-  the Q / E keys. The next run starts from where you put it. **Reset robot to
-  start** goes back to the track's start.
-* **Debugging works.** Set a breakpoint and use **Debug** instead of Run. The
-  robot freezes while your code is paused, so you can inspect the sensor values.
-* As on the real robot, if your program ends while the motors are on, the
-  Cutebot keeps moving. Press **Stop** or close the window to end it.
-* If the window does not appear, look at `cutebot_sim_window.log` in your temp
-  folder.
+### 2. Get the project
 
-## Building your own arena
+Choose **one** option. Options A and C use Git, so you can download updates later with one
+command (`git pull`); option B needs nothing extra.
 
-All sizes and coordinates are in **centimetres**. The origin is the bottom-left
-corner, x points right and y points up. Angles: 0 = facing right, 90 = facing up.
-Hovering the mouse shows the coordinates under the cursor.
+**Option A – Clone in PyCharm (recommended)**
 
-**Tools** (buttons above the arena, or keys 1-4):
+1. Open PyCharm. On the Welcome screen click **Clone Repository**
+   (if a project is already open: **File → New → Project from Version Control**).
+2. In **URL** paste: `https://github.com/RoboticsT411/CuteBotSimulation.git`
+3. Choose a **Directory**, e.g. `C:\Users\<you>\PycharmProjects\CuteBotSimulation`.
+4. Click **Clone**, then **Trust Project**.
 
-| Tool | What it does |
+**Option B – Download a ZIP (no Git needed)**
+
+1. On the GitHub page click **Code → Download ZIP**.
+2. Right-click the ZIP → **Extract All…**
+3. In PyCharm: **File → Open…**, select the extracted folder, then **Trust Project**.
+
+**Option C – Clone in a terminal**
+
+1. Open a terminal (Windows: Start → *Terminal*) and go to the folder where you keep projects.
+2. Run:
+   ```
+   git clone https://github.com/RoboticsT411/CuteBotSimulation.git
+   ```
+3. In PyCharm: **File → Open…**, select the new `CuteBotSimulation` folder, then **Trust Project**.
+
+**Check before you continue:** in PyCharm's **Project** panel (left) you should see the
+`CuteBotSimulation` folder with a **`CutebotSim`** folder inside it. The simulator files
+(`install_simulator.py`, `microbit/`, `cutebot_sim/`, `labs/`, `examples/`) are in `CutebotSim`.
+
+If the repository is private, Git asks you to sign in to GitHub the first time
+(you need access from your lecturer).
+
+### 3. Create the interpreter
+
+PyCharm may offer to create a virtual environment when the project opens: accept it. Otherwise:
+
+1. **File → Settings → Python → Python Interpreter**
+   (macOS: **PyCharm → Settings**; older PyCharm versions: **Project: … → Python Interpreter**).
+2. **Add Interpreter → Add Local Interpreter → Virtualenv Environment → New**.
+3. Location: `venv` inside the project folder. Base interpreter: your Python 3. Click **OK**.
+4. The bottom-right corner of PyCharm should now show this interpreter.
+
+The simulator needs no packages, so don't install any here. In particular, never install
+`microbit`, `microbit-stubs` or `microbit-dummy` (see the warning below). The only packages you
+ever need are `uflash` and `pyserial`, and only for uploading to a real robot.
+
+### 4. Run `install_simulator.py` once
+
+1. In the **Project** panel, click the arrow next to the **`CutebotSim`** folder to expand it.
+2. Right-click **`install_simulator.py`** (inside `CutebotSim`) → **Run 'install_simulator'**.
+
+   > **If PyCharm asks for an environment** (a yellow bar at the top of the editor saying
+   > *Create a virtual environment* / *Custom Environment*), do **not** create a new one:
+   > click **Custom Environment** → **Select existing** → Type **Python** → click **…** and
+   > choose `venv\Scripts\python.exe` inside your project folder (the `venv` created in step 3;
+   > macOS/Linux: `venv/bin/python`) → **OK**. Then run `install_simulator.py` again.
+
+3. The Run panel at the bottom should end with
+   `Done. Any file with 'from microbit import *' will now open the simulator.`
+   Check that its **Interpreter** line shows the `venv` you created in step 3.
+
+This registers the simulator with your interpreter, so `from microbit import *` works from any
+folder. It installs nothing and needs no internet. Run it again after creating a new virtual
+environment or moving the project.
+
+Optional, to stop PyCharm underlining `microbit` in red: right-click the **`CutebotSim`** folder →
+**Mark Directory as → Sources Root**.
+
+### 5. Run a program
+
+Create a file in **`CutebotSim/labs`** (expand `CutebotSim`, right-click **labs** →
+**New → Python File**, no spaces in the name):
+
+```python
+from microbit import *
+
+while True:
+    display.scroll("Hello, World!")
+```
+
+Right-click in the editor → **Run**. The simulator window opens. Try
+`CutebotSim/examples/03_line_follow.py` to see the robot follow the line.
+
+> **Never install `microbit`, `microbit-stubs` or `microbit-dummy`** with pip or PyCharm's
+> package manager. They contain empty look-alike modules and programs would run without doing
+> anything. Code completion already works from the simulator itself.
+
+## Using the simulator
+
+All sizes are in **cm**. The origin is the **bottom-left** corner; angle 0° faces right and
+90° faces up. Hover the mouse to see coordinates.
+
+| Tool (keys 1–4) | What it does |
 |---|---|
-| 1 Move | Drag the robot or an obstacle (obstacles snap to whole cm). Click empty floor to copy x, y into the Obstacles tab. |
-| 2 Draw line | Drag to draw black tape freehand. Hold **Shift** for a straight line. Ends that finish near another line end join automatically, and a loop closes itself if you finish near the start. |
-| 3 Erase | Drag over a line to rub it out (red circle). Click an obstacle to delete it. |
+| 1 Move | Drag the robot or an obstacle. Click an obstacle (turns yellow) and press **Delete** to remove it. |
+| 2 Draw line | Drag to draw black tape; **Shift** = straight line. Ends join automatically and loops close themselves. |
+| 3 Erase | Drag over a line to rub it out; click an obstacle to delete it. |
 | 4 Draw obstacle | Drag out a rectangle. |
 
-**Deleting an obstacle:** click it (it turns yellow) and press **Delete**, or click it with the Erase tool, or right-click it, or select it in the Obstacles tab and press **Delete selected**. Esc goes back to Move.
+Q / E or the mouse wheel rotate the robot 15° (Shift: 1°). Right-click deletes an obstacle.
 
-**Side tabs:**
-* **Robot**: type an exact position and angle and press **Place robot**, or use
-  the 0/90/180/270 buttons. **Set start here** makes the current pose the start
-  position, so **Reset to start** goes there and it is saved with the layout.
-* **Obstacles**: add an obstacle by its bottom-left corner and width x height,
-  see the list (the selected one is outlined in yellow), remove one or all.
-* **Arena**: set the arena width and height (30-500 cm) and the line width.
-  Load a preset (oval, figure eight, obstacles, maze for Lab 10, empty), clear
-  the lines, and **Save layout... / Open layout...** to keep and share layouts
-  as `.json` files (examples are in `layouts/`).
+| Tab | Use it to |
+|---|---|
+| **Robot** | Place the robot at an exact x, y, angle; **Set start here** sets the start position. |
+| **Motors** | Simulate motor mismatch; path trail, straightness read-out and correction hint. |
+| **Obstacles** | Add obstacles by corner and size; list and delete them. |
+| **Arena** | Arena size (30–500 cm) and tape width, presets (oval, figure eight, obstacles, Lab 10 maze, empty), **Save / Open layout**. |
 
-Changes take effect immediately, even while a program is running. The current
-arena is saved automatically in `sim_layout.json` and reopened next time.
+- **RESET** (top right of the micro:bit, or the **R** key) restarts your program from the top,
+  like the micro:bit's reset button: motors stop, the display clears, and the program runs again
+  in the same PyCharm Run window. The robot stays where it is (use **Reset to start** in the Robot
+  tab to move it back). After a program ends it keeps waiting for RESET; press **Stop** in PyCharm
+  to end it.
+- **Sensors tab**: drag the dot on the **tilt pad** to tilt the micro:bit (it rolls "downhill";
+  double-click to level it), or use **Flat / Face down / Logo up / Shake / Freefall**. Set the
+  **Microphone** level or press **Clap** for a loud sound. The speaker line shows the note being
+  played; tick **Play sounds on this PC** to hear it (Windows). Temperature and light have sliders.
+  Try `examples/05_tilt_and_sound.py`.
+- **? micro:bit help** (or **F1**) opens a searchable reference: type e.g. `display`, `button`,
+  `motor` or `line` to see what a function does, an example to copy, whether the simulator supports
+  it, and a link to the full entry in the
+  [official micro:bit MicroPython V2 documentation](https://microbit-micropython.readthedocs.io/en/v2-docs/).
+- The window stays open between runs. Running again is like re-flashing the micro:bit:
+  the new program takes over and the robot returns to its start.
+- If a program ends with the motors on, the robot keeps moving, as on the real Cutebot.
+  Press **Stop** or close the window.
+- The arena is saved automatically and reopens next time. Example layouts are in `layouts/`.
 
-## Motor mismatch (making the robot behave like a real one)
+### Driving straight: motor mismatch
 
-Real motors are never identical: with `motors(25, 25)` a real Cutebot usually
-drifts to one side. The **Motors** tab simulates this without changing your code.
+Real motors are never identical, so `motors(25, 25)` usually drifts. In the **Motors** tab set,
+for example, left 100 % and right 92 %: your code is unchanged, but the right wheel turns 8 %
+slower. After a run at one constant speed the tab shows the drift and suggests a correction,
+e.g. `motors(25, 27)` or `motors(23, 25)`, calculated only from the measured distance and turn,
+exactly as you would with a real robot. **Random hidden** sets a secret mismatch as an exercise.
 
-* Set **left %** and **right %** (100 = exact, 92 = 8 % weaker) and press **Apply**.
-  The panel shows the speeds the wheels really get, e.g. "code 25 gives right 23.0".
-* **Random hidden** gives one wheel a secret 3-15 % weakness: an exercise for
-  students to find the correction. **Reveal** shows it. **Exact** removes it.
-* The **path trail** (red) and the **straightness** read-out (forward distance,
-  sideways drift, angle turned since the run started) show how straight it went.
-* After a run at one constant speed, the read-out also suggests a **correction**,
-  e.g. "right wheel is ~92 % of the other - try motors(25, 27) or motors(23, 25)".
-  It is worked out only from what the robot did (distance and angle turned), not from
-  the hidden setting, so it is the same calculation you can do with a real robot:
-  wheel distances = forward distance +/- (angle in radians x wheel spacing / 2),
-  and new speed = old speed x (distance of the faster wheel / distance of the slower wheel).
-* Change the speeds in your code and run again until the drift is close to zero.
-  Speeds are whole numbers, so a small drift can remain. Use the same numbers on the real robot.
+Speeds are whole numbers: the Cutebot receives each speed as one byte, so `25.5` raises
+`TypeError` on the micro:bit and in the simulator. Use `int(round(speed))`.
 
-The setting is saved with the arena and in layout files, so a teacher can hand out a
-layout with a hidden mismatch.
+## Hardware support: uploading to a real Cutebot
 
-**Speeds must be whole numbers (0-100).** The Cutebot receives each speed as one byte
-over I2C, so `bytearray([0x01, 0x02, 25.5, 0])` raises `TypeError` on the micro:bit
-(and in the simulator). Convert first, e.g. `int(round(25 * 1.08))`.
+The same `.py` file that runs in the simulator runs on the real robot. The micro:bit has its
+own built-in `microbit` module, so the simulator files are not used there. To upload, use the
+**micro:bit Flasher + REPL** program
+([`MicrobitUploader.py`](https://github.com/mjtroniks/Microbit/blob/main/MicrobitUploader.py)):
+it flashes your file with `uflash` and shows the robot's `print()` output over USB.
 
-## Running the same program on the real Cutebot
+![micro:bit Flasher + REPL](Docs/uploader.png)
 
-Use the MicroPython plugin's **Flash** run configuration, exactly as in the wiki.
-The board has its own built-in `microbit` module, so the files in this project
-are not used there.
+*Example screen (values shown for illustration).*
+
+### 1. Install the tools (once)
+
+Open PyCharm's **Terminal** (it uses the project's virtual environment) and run:
+
+```
+python -m pip install uflash pyserial
+```
+
+On the university network, if pip fails with a certificate error (`SSL: CERTIFICATE_VERIFY_FAILED`), use:
+
+```
+python -m pip install uflash pyserial --trusted-host pypi.org --trusted-host files.pythonhosted.org
+```
+
+`uflash` and `pyserial` do not contain a `microbit` module, so they do not affect the simulator.
+
+### 2. Get the uploader and the lab material
+
+```
+git clone https://github.com/mjtroniks/Microbit.git
+git clone https://github.com/LSBU-Electronics-Lab/MicroPython.git
+```
+
+The first contains `MicrobitUploader.py`; the second contains the lab programs
+(instructions in the [lab wiki](https://github.com/LSBU-Electronics-Lab/MicroPython/wiki)).
+Without Git, use **Code → Download ZIP** on each GitHub page.
+
+### 3. Upload a program
+
+1. Put the robot on its **stand** so it cannot drive off the bench, and check the
+   ultrasonic sensor is plugged into **SR04** (not I2C).
+2. Connect the micro:bit by USB. It appears as a drive called **MICROBIT**.
+3. Start the uploader from the same Terminal: `python Microbit/MicrobitUploader.py`
+   (adjust the path to where you cloned it).
+4. **Browse…** to your `.py` file, check the **MICROBIT drive** (click **Refresh** if it is
+   empty) and click **Upload to micro:bit**. The orange LED on the back flashes; when it
+   stops, the program starts.
+5. To see `print()` output: choose the **Serial port** (usually *mbed Serial Port* /
+   *USB Serial Device*, e.g. `COM5`) and click **Connect**. **Interrupt (Ctrl+C)** stops the
+   program, **Enter REPL** gives a `>>>` prompt, **Soft Reset** restarts it.
+
+Notes:
+- The uploader finds the micro:bit by drive letter, so it works on **Windows**.
+- `uflash` must be installed in the same Python that runs the uploader; if it says
+  *"uflash is not installed"*, it prints the exact install command for that Python.
+- The serial connection is closed automatically before each upload; connect again afterwards.
+- `uflash` puts its own MicroPython on the micro:bit (for the V2 an early 2.0 release). If a
+  newer MicroPython feature is missing, flash from [python.microbit.org](https://python.microbit.org)
+  or with PyCharm's MicroPython plugin instead.
+- Robot drifting to one side? Measure it, then use the simulator's **Motors** tab to find
+  corrected speeds (see above).
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `ModuleNotFoundError: No module named 'microbit'` | Run `install_simulator.py` with the same interpreter PyCharm uses. |
+| Program finishes instantly, no window | A look-alike package is installed: `pip uninstall microbit microbit-stubs microbit-dummy`, then run `install_simulator.py` again. |
+| Red underline under `microbit` but it runs | Right-click the project folder → **Mark Directory as → Sources Root**, or **File → Invalidate Caches**. |
+| No simulator window | Python lacks Tkinter: reinstall from python.org. See `cutebot_sim_window.log` in your temp folder. |
+| `TypeError` on motor speeds | Use whole numbers 0–100. |
+| Uploader: "No MICROBIT drive found" | Use a data USB cable, reconnect the micro:bit, click **Refresh**. The drive must show **MICROBIT** in File Explorer. |
+| Uploader: "pyserial not installed" / "uflash is not installed" | Run `python -m pip install uflash pyserial` with the Python that starts the uploader. |
+| Uploader: cannot connect to COM port | Close other programs using the port (PyCharm's MicroPython REPL, another uploader window) and try again. |
+| Strange import errors | Don't name your files `microbit.py`, `machine.py`, `utime.py` or `neopixel.py`. |
 
 ## Command line
 
 ```
-python examples/03_line_follow.py          # run with the window
-python -m cutebot_sim.gui                  # open the window on its own
-python tests/smoke_test.py                 # self-check (no window)
-python tests/check_line_follow.py examples/03_line_follow.py 30 0
+python examples/03_line_follow.py      # run a program with the simulator window
+python -m cutebot_sim.gui              # open the window on its own
+python tests/smoke_test.py             # self-check, no window
 ```
 
 ## Robot size and calibration
 
-The robot is 8.5 x 8.5 cm, like the real Cutebot. Its size is set by a few
-measurements at the top of `cutebot_sim/robot.py` (overall length and width,
-wheel size, axle position, line-sensor position and spacing). The drawing,
-wheel spacing, sensors and collisions are all calculated from them, so to match
-your robot exactly just measure it and change those numbers.
-Top speed and motor response are approximations and can be tuned there too.
+The robot's geometry is set by a few measurements at the top of `cutebot_sim/robot.py`
+(overall length and width, wheel size, axle position, line-sensor position and spacing).
+The drawing, wheel spacing, sensors and collisions are calculated from them. Measure your
+Cutebot and change them to match it; top speed and motor response can be tuned there too.
 
-## Project layout
+## Project structure
 
 ```
-microbit/            the simulated micro:bit module (what students import)
-utime.py machine.py neopixel.py music.py   other MicroPython modules
+install_simulator.py   run once per virtual environment
+microbit/              the simulated micro:bit module
+utime.py machine.py neopixel.py music.py
 cutebot_sim/
-    robot.py         Cutebot hardware model and physics
-    maps.py          tracks (units: cm)
-    display.py       Image and display
-    runtime.py       starts/links to the window, runs the physics thread
-    gui.py           the simulator window (Tkinter, separate process)
-    shared.py        shared-memory link between program and window
-    _data.py         micro:bit font and images (MIT, see file header)
-examples/            example programs
-tests/               self-checks
+    robot.py           Cutebot model and physics (geometry settings at the top)
+    maps.py            arenas, presets and layout files
+    display.py         Image and display
+    runtime.py         connects your program to the window, runs the physics
+    gui.py             the simulator window (Tkinter)
+    shared.py          shared-memory link between program and window
+    _data.py           micro:bit font and images
+labs/                  your programs
+examples/              example programs
+layouts/               example arena layouts (.json)
+tests/                 self-checks
+docs/                  images for this README
 ```
 
 ## How it works
 
-Importing `microbit` starts a physics thread inside your program and connects to
-the simulator window, which runs as a separate process. The two exchange the
-robot's state through a small block of shared memory. Because the physics runs
-inside your program, pausing at a breakpoint also pauses the robot. The window
-only draws the robot and sends button presses and mouse actions back.
+Importing `microbit` starts a physics thread inside your program and connects to the
+simulator window, which runs as a separate process; they share the robot's state through a
+small block of shared memory. Because the physics runs inside your program, a breakpoint
+pauses the robot as well. The window owns the arena (size, lines, obstacles) and sends any
+change to the running program immediately.
 
 ## Credits
 
-micro:bit font: Lancaster University codal-core (MIT). Built-in images:
-micropython-microbit-v2 by Damien P. George (MIT). Both are included in
-`cutebot_sim/_data.py` with their notices.
+- micro:bit font from Lancaster University [codal-core](https://github.com/lancaster-university/codal-core) (MIT).
+- Built-in images from [micropython-microbit-v2](https://github.com/microbit-foundation/micropython-microbit-v2) by Damien P. George (MIT).
+
+Both are included in `cutebot_sim/_data.py` with their licence notices.
