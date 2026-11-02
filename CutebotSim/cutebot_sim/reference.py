@@ -231,10 +231,14 @@ ENTRIES = [
        "speaker indicator (no real sound).",
        "audio.play(Sound.HAPPY)",
        PART + " (indicator only)", DOCS + "audio.html", "sound expression speaker giggle"),
-    _e("radio", "import radio\nradio.on()   radio.send('hi')   radio.receive()",
-       "Send short messages between micro:bits.",
-       "import radio\nradio.on()\nradio.config(group=7)\nradio.send('go')",
-       NO + " (module not available)", DOCS + "radio.html", "wireless message send receive"),
+    _e("radio", "import radio\nradio.on()   radio.config(group=7)   radio.send('hi')   radio.receive()",
+       "Send short messages between micro:bits on the same channel and group. receive() gives "
+       "the next message or None. In the simulator the Radio window shows what your program "
+       "sends and lets you send messages to it; in a LAN shared arena messages reach the other "
+       "robots.",
+       "import radio\nradio.on()\nradio.config(group=7)\nradio.send('go')\n"
+       "msg = radio.receive()\nif msg == 'stop':\n    display.show(Image.NO)",
+       YES + " (Radio window, LAN)", DOCS + "radio.html", "wireless message send receive group channel"),
     _e("random", "import random\nrandom.randint(a, b)   random.choice(list)",
        "Random numbers: randint gives a whole number from a to b; choice picks an item.",
        "import random\ndisplay.show(random.randint(1, 6))",
@@ -259,7 +263,8 @@ ENTRIES = [
        YES, WIKI + "LAB-8-Line-Tracking", "cutebot line follow track sensor black"),
     _e("Cutebot: ultrasonic distance", "trigger pin8, echo pin12",
        "Send a 10 µs pulse on pin8, then time the echo on pin12. distance (cm) = echo time (µs) "
-       "x 0.0343 / 2. Plug the sensor into the SR04 socket.",
+       "x 0.0343 / 2. Plug the sensor into the SR04 socket. Like the real sensor it gives no reading "
+       "closer than 2 cm (the echo looks like nothing in range).",
        "import machine, utime\npin8.write_digital(1)\nutime.sleep_us(10)\npin8.write_digital(0)\n"
        "t = machine.time_pulse_us(pin12, 1, 25000)\nprint(t * 0.0343 / 2, 'cm')",
        YES, WIKI + "LAB-6-Distance-Sensors", "cutebot sonar ultrasonic distance obstacle echo"),

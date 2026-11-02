@@ -33,6 +33,7 @@ from .robot import Cutebot
 _orig_sleep = time.sleep      # the real time.sleep (time.sleep is patched for RESET)
 
 PHYSICS_HZ = 200
+MAX_SPEED = 4.0          # fastest simulation speed (4x real time)
 GUI_START_TIMEOUT_S = 20.0
 LOG_PATH = os.path.join(tempfile.gettempdir(), "cutebot_sim_window.log")
 
@@ -64,7 +65,6 @@ def _pid_alive(pid):
 
 class Runtime:
     def __init__(self):
-        self.t0 = time.perf_counter()
         self.headless = os.environ.get("CUTEBOT_SIM_HEADLESS") == "1"
         self.script = os.path.basename(sys.argv[0]) if sys.argv and sys.argv[0] else "<program>"
         self.script_path = os.path.abspath(sys.argv[0]) if sys.argv and sys.argv[0] else None
@@ -83,7 +83,31 @@ class Runtime:
         self.loud_threshold = 128
         self.quiet_threshold = 64
         self.speaker_on = True
+        self.accel_range = 2                  # g (accelerometer.set_range)
+        # radio (the radio module talks to these)
+        self.radio_cfg = {"on": False, "group": 0, "channel": 7, "length": 32, "queue": 3}
+        self.radio_queue = []                 # received messages: (bytes, rssi, time_us)
+        self._rx_pos = 0
+        self._radio_lock = threading.Lock()
+        self.local_radio = []                 # headless: messages sent (for tests)
+        # simulation clock: slows down in slow motion, stops while paused
+        # (sim time, real time of that moment, running, speed): replaced as a whole so
+        # other threads always see a consistent clock
+        self._clock = (0.0, time.perf_counter(), True, 1.0)
+        self.t0 = 0.0                             # sim time when the program (re)started
+        self._step_seen = 0
+        self._free_step = False                   # released by Step: run one line
+        self._holding = False
+        self._force_pause = ""                    # reason, set when the program pauses itself
+        self._pause_seen_ack = False
+        self._last_line_reading = None
+        self._last_motor = (0.0, 0.0)
+        self._motor_pause_armed = True
+        self._last_bumps = 0
         self.robot = Cutebot()
+        self.robot.on_motor = self._log_motor
+        self._line = 0
+        self._main_line = 0
         self.display_buf = bytearray(25)
         self.shared = None
         self.gen = 0
@@ -153,6 +177,7 @@ class Runtime:
             return
         self.shared = s
         # Claim the simulator: like flashing a new program onto the micro:bit.
+        s.set("run_time", 0.0)
         s.bump("owner_gen")
         self.gen = s.get("owner_gen")
         s.set("owner_pid", os.getpid())
@@ -171,7 +196,135 @@ class Runtime:
         if self._last_pose_req and x == x:
             self.robot.set_pose(x, y, h)
         self.btn_consumed = {"a": s.get("btn_a_count"), "b": s.get("btn_b_count")}
+        self._rx_pos = s.get("rx_wr")
+        self._step_seen = s.get("step_seq")
+        s.set("cmd_n", 0)
+        s.set("cur_line", 0)
+        s.set("prog_path", self.script_path or "")
+        s.set("radio_on", 0)
         self._publish()
+        self._start_line_trace()
+        self._wait_for_go()
+
+    # --- which line is running (Code window) -------------------------------------------
+    def _start_line_trace(self):
+        """Report the line of the student's file being run.  Not used while a debugger
+        is attached (it needs the trace hook itself)."""
+        s = self.shared
+        if s is None or not self.script_path or sys.gettrace() is not None:
+            if s is not None:
+                s.set("trace_on", 0)
+            return
+        target = os.path.normcase(os.path.abspath(self.script_path))
+        known = {}
+        off, _ = s.raw("cur_line")
+        pack = shared.struct.pack_into
+        buf = s.buf
+
+        def is_target(code):
+            fn = code.co_filename
+            r = known.get(fn)
+            if r is None:
+                try:
+                    r = known[fn] = os.path.normcase(os.path.abspath(fn)) == target
+                except Exception:
+                    r = known[fn] = False
+            return r
+
+        paused_off, _ = s.raw("paused")
+
+        def local(frame, event, arg):
+            if event == "line":
+                self._line = frame.f_lineno
+                if frame.f_code.co_name == "<module>":
+                    self._main_line = frame.f_lineno       # the line in the main program
+                    self._motor_pause_armed = True
+                pack("<I", buf, off, frame.f_lineno)
+                if buf[paused_off] or self._force_pause:
+                    self._on_line()
+            return local
+
+        def glob(frame, event, arg):
+            if event == "call" and is_target(frame.f_code):
+                return local
+            return None
+
+        sys.settrace(glob)
+        f = sys._getframe()
+        while f is not None:
+            if is_target(f.f_code):
+                f.f_trace = local
+            f = f.f_back
+        s.set("trace_on", 1)
+
+    def _log_motor(self, left, right):
+        s = self.shared
+        if s is None or s.get("owner_gen") != self.gen:
+            return
+        n = s.get("cmd_n")
+        off, _ = s.raw("cmd_log")
+        shared.struct.pack_into("<5f", s.buf, off + (n % shared.CMD_LOG) * 20,
+                                self.now() - self.t0, left, right, float(self._line),
+                                float(self._main_line))
+        s.set("cmd_n", (n + 1) & 0xFFFFFFFF)
+        changed = (left, right) != self._last_motor
+        self._last_motor = (left, right)
+        if (s.get("pause_on") & 1 and changed and self._motor_pause_armed and self._user_code
+                and threading.current_thread() is threading.main_thread()):
+            self._motor_pause_armed = False       # once per line of the main program
+            self._auto_pause(f"motors L {left:+.0f} R {right:+.0f}")
+            self._hold()                          # stop right at the line that sent it
+
+    # --- races: wait for the teacher's GO --------------------------------------------------
+    def _wait_for_go(self):
+        s = self.shared
+        if s is None or not s.get("hold"):
+            return
+        s.set("held", 1)
+        print("[cutebot-sim] Race armed - waiting for the teacher's GO...", file=sys.stderr, flush=True)
+        try:
+            while s.get("hold") and not self._stop and not self.reset_pending:
+                _orig_sleep(0.01)
+        finally:
+            s.set("held", 0)
+        self.t0 = self.now()                   # running_time() counts from GO
+        print("[cutebot-sim] GO!", file=sys.stderr, flush=True)
+
+    # --- radio ---------------------------------------------------------------------------
+    def radio_send(self, data):
+        cfg = self.radio_cfg
+        s = self.shared
+        if s is None:
+            self.local_radio.append(bytes(data))
+            return
+        if s.get("owner_gen") == self.gen:
+            s.ring_put("tx_msgs", "tx_wr", data, cfg["group"], cfg["channel"])
+
+    def radio_poll(self):
+        """Move newly received messages for our group/channel into the queue."""
+        s = self.shared
+        if s is None:
+            return
+        with self._radio_lock:
+            self._rx_pos, msgs = s.ring_get("rx_msgs", "rx_wr", self._rx_pos)
+            self._queue_msgs(msgs)
+
+    def _queue_msgs(self, msgs):
+        cfg = self.radio_cfg
+        for data, group, channel in msgs:
+            if not cfg["on"] or group != cfg["group"] or channel != cfg["channel"]:
+                continue
+            if len(data) > cfg["length"] or len(self.radio_queue) >= cfg["queue"]:
+                continue                            # too long, or the queue is full: dropped
+            self.radio_queue.append((data, -50, int((self.now() - self.t0) * 1e6)))
+
+    def radio_status(self):
+        s = self.shared
+        if s is not None and s.get("owner_gen") == self.gen:
+            cfg = self.radio_cfg
+            s.set("radio_on", 1 if cfg["on"] else 0)
+            s.set("radio_group", cfg["group"])
+            s.set("radio_channel", cfg["channel"])
 
     def _launch_gui(self):
         pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -243,6 +396,13 @@ class Runtime:
                 if rr != self._reset_seen:
                     self._reset_seen = rr
                     self.request_reset()
+                self.robot.realistic = bool(s.get("realism"))
+                self.robot.dead_zone = s.get("dead_zone") or 10
+                n = s.get("others_n")
+                o = s.get_slice("others", 3 * n) if n else []
+                self.robot.others = [(o[i * 3], o[i * 3 + 1]) for i in range(n)]
+                if self.radio_cfg["on"]:
+                    self.radio_poll()
                 g = s.get("motor_gain")
                 if g[0] >= 0 and g[1] >= 0 and (g[0] > 0 or g[1] > 0 or self._gain_set):
                     self.robot.motor_gain = g          # both 0 before the window sets it = ignore
@@ -255,16 +415,41 @@ class Runtime:
                         self.robot.reset_to_start()
                     else:
                         self.robot.set_pose(x, y, h)
-            self.robot.step(dt)
+            # simulated clock: slow motion, pause, step
+            running = self._clock_running(s)
+            speed = 1.0
+            if s is not None:
+                speed = s.get("sim_speed")
+                speed = speed if 0.01 <= speed <= MAX_SPEED else 1.0
+            self._clock = (self.now(), now, running, speed)
+            sim_dt = min(dt, 0.05) * speed if running else 0.0
+            n = max(1, int(sim_dt / 0.005 + 0.999))          # small steps when running fast
+            for _ in range(n):
+                self.robot.step(sim_dt / n)
+            if s is not None and running and self._user_code:
+                self._check_auto_pause(s)
             if s is not None:
                 self._publish()
             if self._trace is not None and now - last_trace >= 0.02:
                 last_trace = now
                 r = self.robot
                 ll, lr = r.line_sensors()
-                self._trace.write(f"{now - self.t0:.3f},{r.x:.2f},{r.y:.2f},"
+                self._trace.write(f"{self.now() - self.t0:.3f},{r.x:.2f},{r.y:.2f},"
                                   f"{(r.heading * 57.29578):.1f},{r.motor_cmd[0]:.0f},"
                                   f"{r.motor_cmd[1]:.0f},{ll},{lr}\n")
+
+    def _check_auto_pause(self, s):
+        """Pause when... options: a line sensor changes or the robot bumps into something."""
+        flags = s.get("pause_on")
+        reading = self.robot.line_sensors(exact=True)
+        if flags & 2 and self._last_line_reading is not None and reading != self._last_line_reading:
+            side = "left" if reading[0] != self._last_line_reading[0] else "right"
+            self._auto_pause(f"{side} line sensor changed")
+        self._last_line_reading = reading
+        b = self.robot.bumps
+        if flags & 4 and b > self._last_bumps:
+            self._auto_pause("bump")
+        self._last_bumps = b
 
     def _read_world(self, s, reset=False):
         """Rebuild the arena from the window's world (arena size, lines, obstacles)."""
@@ -303,11 +488,14 @@ class Runtime:
             s.set("motors", r.motor_cmd)
             s.set("wheel_v", r.wheel_v)
             s.set("line", r.line_sensors())
+            s.set("bumps", r.bumps)
             s.set("lights", r.lights)
             s.set("neopixels", r.neopixels)
             s.set("sonar_active", 1 if r.sonar_active else 0)
             s.set("sonar_cm", r.sonar_distance())
         s.set("display", bytes(self.display_buf))
+        s.set("run_time", max(0.0, self.now() - self.t0))
+        s.set("accel_now", self.accel())
         s.bump("prog_tick")
 
     # --- buttons ---------------------------------------------------------------------
@@ -333,6 +521,19 @@ class Runtime:
             x, y, z = 0.0, 0.0, -1024.0
         else:
             x, y, z = s.get("accel")
+            if s.get("mounted"):
+                # upright on the Cutebot: the robot's own motion shows up too
+                from .robot import DISPLAY_FACES_FORWARD
+                f = 1.0 if DISPLAY_FACES_FORWARD else -1.0
+                fwd, left = self.robot.lin_acc
+                mg = 1000.0 / 981.0                       # cm/s^2 -> milli-g
+                x += -f * left * mg
+                z += -f * fwd * mg
+                if self.robot.realistic:
+                    import random
+                    x += random.gauss(0, 12)
+                    y += random.gauss(0, 12)
+                    z += random.gauss(0, 12)
         name, t = self._pulse
         age = time.perf_counter() - t
         if name and age < sensors.PULSE_S:
@@ -344,7 +545,8 @@ class Runtime:
             else:                                # 3g / 6g / 8g
                 g = float(name[0]) * 1024.0
                 x, y, z = x, y, -g
-        return [int(round(x)), int(round(y)), int(round(z))]
+        lim = self.accel_range * 1024.0                   # the sensor saturates at its range
+        return [int(round(max(-lim, min(lim, v)))) for v in (x, y, z)]
 
     def current_gesture(self):
         name, t = self._pulse
@@ -409,17 +611,89 @@ class Runtime:
 
     # --- RESET -----------------------------------------------------------------------------
     def sleep(self, seconds):
-        """time.sleep replacement: in the main thread it wakes up early when RESET is pressed."""
-        if threading.current_thread() is not threading.main_thread():
-            return _orig_sleep(seconds)
-        end = time.perf_counter() + seconds
+        """time.sleep replacement.  Waits in simulated time (slow motion, pause), and in the
+        main thread it wakes up early when RESET is pressed."""
+        main = threading.current_thread() is threading.main_thread()
+        end = self.now() + max(0.0, seconds)
         while True:
-            if self.reset_pending:
+            if main and self.reset_pending:
                 raise KeyboardInterrupt("RESET")
-            left = end - time.perf_counter()
+            left = end - self.now()
             if left <= 0:
                 return
-            _orig_sleep(min(left, 0.02))
+            _t, _b, running, speed = self._clock
+            speed = speed if running else 0.0
+            _orig_sleep(min(left / speed, 0.02) if speed > 0 else 0.02)
+
+    # --- simulated time, pause and step -----------------------------------------------------
+    def now(self):
+        """Simulated time (s).  Same as real time at speed 1; slower in slow motion; stops
+        while paused."""
+        t, base, running, speed = self._clock
+        if running:
+            return t + (time.perf_counter() - base) * speed
+        return t
+
+    def _paused(self):
+        s = self.shared
+        return s is not None and (bool(s.get("paused")) or bool(self._force_pause))
+
+    def _auto_pause(self, why):
+        """The program pauses itself (Pause when... options in the window)."""
+        s = self.shared
+        if s is None or self._force_pause:
+            return
+        self._force_pause = why
+        s.set("auto_pause_why", f"{why} (line {self._line})" if self._line else why)
+        s.bump("auto_pause_seq")
+
+    def _hold(self):
+        """Main thread: wait here while paused.  Step lets one line run."""
+        s = self.shared
+        if s is None:
+            return
+        if not self._paused():
+            return
+        self._holding = True
+        s.set("line_hold", 1)
+        try:
+            while self._paused() and not self._stop:
+                if self.reset_pending:
+                    raise KeyboardInterrupt("RESET")
+                seq = s.get("step_seq")
+                if seq != self._step_seen:
+                    self._step_seen = seq
+                    self._free_step = True        # run this line, stop at the next one
+                    break
+                _orig_sleep(0.01)
+        finally:
+            self._holding = False
+            s.set("line_hold", 0)
+
+    def _on_line(self):
+        """Called before each line of the student's file runs."""
+        if not self._paused():
+            self._free_step = False
+            return
+        s = self.shared
+        if self._free_step:
+            self._free_step = False               # one line done: stop here
+        elif s.get("step_seq") != self._step_seen:
+            self._step_seen = s.get("step_seq")   # Step while sleeping: this is the next line
+        self._hold()
+
+    def _clock_running(self, s):
+        """Physics/clock run unless paused (Step and an unfinished line keep them going)."""
+        if s is None:
+            return True
+        if self._force_pause and s.get("paused"):
+            self._force_pause = ""                # the window has taken over the pause
+        if not self._paused():
+            return True
+        if not self._user_code:
+            self._step_seen = s.get("step_seq")   # nothing to step through
+            return False
+        return self._free_step or s.get("step_seq") != self._step_seen
 
     def request_reset(self):
         """RESET button (or microbit.reset()): stop the motors and restart the program."""
@@ -456,13 +730,21 @@ class Runtime:
         self.gesture_history, self.gesture_flags = [], set()
         self.sound_history, self.sound_flags = [], set()
         self.set_speaker(0, "")
-        self.t0 = time.perf_counter()           # running_time() starts again from 0
+        self.t0 = self.now()                    # running_time() starts again from 0
         self._error_text = None
         s = self.shared
         if s is not None:
             self.btn_consumed = {"a": s.get("btn_a_count"), "b": s.get("btn_b_count")}
             s.set("message", "")
             s.set("prog_state", shared.STATE_RUNNING)
+            s.set("cmd_n", 0)
+            s.set("cur_line", 0)
+            s.set("run_time", 0.0)
+            self._force_pause = ""
+            self.radio_cfg.update(on=False, group=0, channel=7, length=32, queue=3)
+            self.radio_queue = []
+            self._rx_pos = s.get("rx_wr")
+            self.radio_status()
             s.bump("run_seq")
             self._publish()
 
@@ -470,6 +752,9 @@ class Runtime:
         """Run the student's file again in this process (after RESET)."""
         self._soft_reset()
         print(f"\n[cutebot-sim] RESET - running {self.script} again\n", file=sys.stderr, flush=True)
+        self._wait_for_go()
+        if self.reset_pending:
+            return
         started = time.perf_counter()
         self._user_code = True
         try:
@@ -498,6 +783,7 @@ class Runtime:
 
     def _show_finished(self):
         s = self.shared
+        s.set("cur_line", 0)
         if self._error_text:
             s.set("message", self._error_text)
             s.set("prog_state", shared.STATE_ERROR)

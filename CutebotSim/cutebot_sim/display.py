@@ -303,9 +303,13 @@ class Display:
 
 
 def _sleep_while(alive, ms):
-    end = time.perf_counter() + ms / 1000.0
+    from . import runtime
+
+    rt = runtime._runtime
+    clock = rt.now if rt is not None else time.perf_counter     # simulated time (slow motion)
+    end = clock() + ms / 1000.0
     while alive():
-        left = end - time.perf_counter()
+        left = end - clock()
         if left <= 0:
             return
         time.sleep(min(left, 0.02))

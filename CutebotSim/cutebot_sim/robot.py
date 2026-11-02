@@ -19,6 +19,7 @@ are approximations; change them if you calibrate against a real Cutebot.
 """
 
 import math
+import random
 import threading
 import time
 
@@ -82,7 +83,19 @@ def robot_shape():
 
 SPEED_OF_SOUND_CM_PER_S = 34320.0
 SONAR_MAX_CM = 400.0
-SONAR_MIN_CM = 2.0
+SONAR_MIN_CM = 2.0           # closer than this the module gives no reading (like the real one)
+SONAR_NO_ECHO_S = 0.038      # pulse length when nothing is detected
+
+# --- realistic mode (Motors tab) ------------------------------------------------------
+DEFAULT_DEAD_ZONE = 10       # motor speeds below this do not turn the wheel
+LINE_JITTER_CM = 0.15        # line sensor spot wobble: readings flicker at the tape edge
+SONAR_NOISE_CM = 0.3         # random error of each sonar reading
+SONAR_MISS = 0.03            # chance that a reading is missed (no echo)
+BUMP_GAP_S = 0.5             # a new collision only counts after this long without contact
+
+# --- accelerometer when the micro:bit stands on the Cutebot ----------------------------
+DISPLAY_FACES_FORWARD = True # the LED display faces the front of the robot (False = the back)
+ACCEL_TAU_S = 0.008          # how quickly the sensed acceleration follows the motion
 
 
 class Cutebot:
@@ -99,6 +112,14 @@ class Cutebot:
         self._echo_seen = None           # the pulse the program has already seen go high
         self._trigger_level = 0
         self.x = self.y = self.heading = 0.0
+        self.realistic = False
+        self.dead_zone = DEFAULT_DEAD_ZONE
+        self.others = []                 # other robots (x, y) in a shared arena
+        self.bumps = 0                   # collisions so far
+        self._touching_t = -1.0          # last time the robot was touching something
+        self.on_motor = None             # callback(left, right) after a motor command
+        self.lin_acc = (0.0, 0.0)        # sensed acceleration: forward, left (cm/s^2)
+        self._v_prev = None
         self.reset_to_start()
 
     # --- pose -------------------------------------------------------------------
@@ -112,6 +133,8 @@ class Cutebot:
             self.x, self.y = float(x), float(y)
             self.heading = math.radians(heading_deg)
             self.wheel_v = [0.0, 0.0]
+            self._v_prev = None              # moved by hand: no acceleration spike
+            self.lin_acc = (0.0, 0.0)
 
     def set_map(self, world, reset=False):
         with self.lock:
@@ -133,9 +156,13 @@ class Cutebot:
         if dt == 0.0:
             return
         with self.lock:
+            x_before, y_before = self.x, self.y
             k = min(1.0, dt / MOTOR_TAU_S)
             for i in (0, 1):
-                target = self.motor_cmd[i] / 100.0 * CM_PER_S_AT_100 * self.motor_gain[i]
+                cmd = self.motor_cmd[i]
+                if self.realistic and abs(cmd) < self.dead_zone:
+                    cmd = 0.0                          # too slow to overcome friction
+                target = cmd / 100.0 * CM_PER_S_AT_100 * self.motor_gain[i]
                 self.wheel_v[i] += (target - self.wheel_v[i]) * k
             vl, vr = self.wheel_v
             v = (vl + vr) / 2.0
@@ -145,13 +172,53 @@ class Cutebot:
             self.x += v * math.cos(h_mid) * dt
             self.y += v * math.sin(h_mid) * dt
             self.heading = (self.heading + w * dt + math.pi) % (2 * math.pi) - math.pi
-            self._collide()
+            if self._collide():
+                now = time.perf_counter()
+                if now - self._touching_t > BUMP_GAP_S:
+                    self.bumps += 1
+                self._touching_t = now
+            self._sense_acceleration(x_before, y_before, dt)
+
+    def _sense_acceleration(self, x0, y0, dt):
+        """Acceleration of the robot's body (speeding up, braking, turning, crashes),
+        in the robot's own frame, for the accelerometer."""
+        vx, vy = (self.x - x0) / dt, (self.y - y0) / dt
+        if self._v_prev is None:
+            self._v_prev = (vx, vy)
+            return
+        ax, ay = (vx - self._v_prev[0]) / dt, (vy - self._v_prev[1]) / dt
+        self._v_prev = (vx, vy)
+        c, s = math.cos(self.heading), math.sin(self.heading)
+        fwd = ax * c + ay * s
+        left = ax * s - ay * c                 # left of the robot is (sin h, -cos h)
+        k = dt / (ACCEL_TAU_S + dt)
+        f0, l0 = self.lin_acc
+        self.lin_acc = (f0 + (fwd - f0) * k, l0 + (left - l0) * k)
+
+    def other_boxes(self):
+        """Other robots as boxes (for the sonar)."""
+        h = BODY_RADIUS_CM * 0.85
+        return [(x - h, y - h, x + h, y + h) for x, y in self.others]
 
     def _collide(self):
+        """Push the robot out of walls, obstacles and other robots.  True if it touched."""
         r = BODY_RADIUS_CM
+        touched = False
         for _ in range(3):
             cx, cy = self._local(BODY_CENTRE_AHEAD_CM, 0.0)
             moved = False
+            for ox, oy in self.others:                 # other robots: circle against circle
+                dx, dy = cx - ox, cy - oy
+                d = math.hypot(dx, dy)
+                if d < 2 * r:
+                    if d < 1e-6:
+                        dx, dy, d = 1.0, 0.0, 1.0
+                    push = 2 * r - d
+                    self.x += dx / d * push
+                    self.y += dy / d * push
+                    cx += dx / d * push
+                    cy += dy / d * push
+                    moved = True
             for x0, y0, x1, y1 in self.map.solid_boxes():
                 px = min(max(cx, x0), x1)
                 py = min(max(cy, y0), y1)
@@ -169,26 +236,33 @@ class Cutebot:
                         self.x += sx * (dist + r)
                         self.y += sy * (dist + r)
                     moved = True
+            touched = touched or moved
             if not moved:
                 break
+        return touched
 
     # --- sensors -----------------------------------------------------------------
     def line_sensor_positions(self):
         g = LINE_SENSOR_GAP_CM / 2.0
         return (self._local(LINE_SENSOR_AHEAD_CM, g), self._local(LINE_SENSOR_AHEAD_CM, -g))
 
-    def line_sensors(self):
-        """(left, right) digital values: 0 = over the black line, 1 = white."""
+    def line_sensors(self, exact=False):
+        """(left, right) digital values: 0 = over the black line, 1 = white.
+        In realistic mode the reading wobbles where the sensor is near the tape edge."""
         with self.lock:
             (lx, ly), (rx, ry) = self.line_sensor_positions()
+            if self.realistic and not exact:
+                j = LINE_JITTER_CM
+                lx, ly = lx + random.uniform(-j, j), ly + random.uniform(-j, j)
+                rx, ry = rx + random.uniform(-j, j), ry + random.uniform(-j, j)
             return (0 if self.map.is_black(lx, ly) else 1,
                     0 if self.map.is_black(rx, ry) else 1)
 
     def sonar_distance(self):
+        """True distance (cm) from the sensor to the first obstacle ahead."""
         with self.lock:
             sx, sy = self._local(SONAR_AHEAD_CM, 0.0)
-            d = self.map.raycast(sx, sy, self.heading, SONAR_MAX_CM)
-            return max(SONAR_MIN_CM, d)
+            return self.map.raycast(sx, sy, self.heading, SONAR_MAX_CM, self.other_boxes())
 
     # --- ultrasonic sensor on pins 8 / 12 ---------------------------------------------
     def trigger_write(self, level):
@@ -197,9 +271,13 @@ class Cutebot:
         if self._trigger_level == 1 and level == 0:
             self.sonar_active = True
             d = self.sonar_distance()
+            if self.realistic:
+                d += random.gauss(0.0, SONAR_NOISE_CM)
             now = time.perf_counter()
             start = now + 0.0005              # the module sends its 40 kHz burst first
-            width = 0.038 if d >= SONAR_MAX_CM else 2.0 * d / SPEED_OF_SOUND_CM_PER_S
+            no_echo = (d >= SONAR_MAX_CM or d < SONAR_MIN_CM
+                       or (self.realistic and random.random() < SONAR_MISS))
+            width = SONAR_NO_ECHO_S if no_echo else 2.0 * d / SPEED_OF_SOUND_CM_PER_S
             self._echo = (start, start + width)
         self._trigger_level = level
 
@@ -230,15 +308,19 @@ class Cutebot:
         if not data:
             return
         reg = data[0]
+        motors = None
         with self.lock:
             if reg in (0x01, 0x02) and len(data) >= 3:
                 direction, speed = data[1], min(int(data[2]), 100)
                 value = float(speed) if direction == 0x02 else -float(speed) if direction == 0x01 else 0.0
                 self.motor_cmd[0 if reg == 0x01 else 1] = value
+                motors = tuple(self.motor_cmd)
             elif reg in (0x04, 0x08) and len(data) >= 4:
                 base = 0 if reg == 0x04 else 3
                 self.lights[base:base + 3] = list(data[1:4])
             # other registers (servos, version, ...) are ignored
+        if motors is not None and self.on_motor is not None:
+            self.on_motor(*motors)                 # outside the lock (it may pause the program)
 
     def set_neopixels(self, pixels):
         with self.lock:

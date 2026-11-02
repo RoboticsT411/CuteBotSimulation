@@ -1,48 +1,27 @@
 from microbit import *
+import math
 
-car_address=0x010
-pinL = pin13
-pinR = pin14
+def motors(left, right):
+    for reg, v in ((0x01, left), (0x02, right)):
+        i2c.write(0x10, bytearray([reg, 0x02 if v >= 0 else 0x01, min(abs(v), 100), 0]))
 
-def motors_speed(left_wheel_speed,right_wheel_speed):
+accelerometer.set_range(8)          # V2: measure up to 8 g so hard knocks are not cut off
+sleep(500)
+base_x = accelerometer.get_x()      # resting values (robot still, on flat ground)
+base_z = accelerometer.get_z()
+LIMIT = 1500                        # mg - try different values on your robot
 
-    left_direction = 0x02 if left_wheel_speed > 0 else 0x01
-    right_direction = 0x02 if right_wheel_speed > 0 else 0x01
-
-    left_wheel_speed = left_wheel_speed if left_wheel_speed > 0 else left_wheel_speed * -1
-    right_wheel_speed = right_wheel_speed if right_wheel_speed > 0 else right_wheel_speed * -1
-
-
-    i2c.write(car_address, bytearray([0x01, left_direction, left_wheel_speed, 0]))
-
-    i2c.write(car_address, bytearray([0x02, right_direction, right_wheel_speed, 0]))
-
-
-# noinspection MicroPythonRequirements
-def get_tracking():
-
-    left = pinL.read_digital()
-    right = pinR.read_digital()
-    if left == 1 and right == 1:
-        return 00
-    elif left == 0 and right == 1:
-        return 10
-    elif left == 1 and right == 0:
-        return 1
-    elif left == 0 and right == 0:
-        return 11
-    else:
-        print("Unknown ERROR")
-
-
-
-while(True):
-
-    i = get_tracking()
-    if i == 10:
-        motors_speed(10, 50)
-    if i == 1:
-
-        motors_speed(50, 10)
-    if i == 11:
-        motors_speed(25, 25)
+motors(40, 40)
+while True:
+    dx = accelerometer.get_x() - base_x
+    dz = accelerometer.get_z() - base_z
+    if math.sqrt(dx * dx + dz * dz) > LIMIT:
+        motors(0, 0)
+        angle = math.degrees(math.atan2(dx, dz))     # 0 = along z, +/-90 = from the side
+        print("CRASH  x", dx, " z", dz, " angle", int(angle))
+        if abs(dz) > abs(dx):
+            display.show(Image.ARROW_N if dz > 0 else Image.ARROW_S)
+        else:
+            display.show(Image.ARROW_E if dx > 0 else Image.ARROW_W)
+        break
+    sleep(5)                        # check often: a bump only lasts a few milliseconds

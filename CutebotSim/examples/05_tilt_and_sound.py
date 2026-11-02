@@ -1,4 +1,5 @@
-# Accelerometer, microphone and speaker. Open the simulator's Sensors tab:
+# Accelerometer, microphone and speaker, with the micro:bit on its own (not on the robot).
+# In the simulator's Sensors tab untick "micro:bit upright on the Cutebot", then:
 # - drag the dot on the tilt pad: the display shows which way the micro:bit is tilted
 # - press Shake: a surprised face
 # - press Clap (or raise the Microphone slider): a short tune plays

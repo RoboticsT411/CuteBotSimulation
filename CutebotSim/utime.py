@@ -3,6 +3,18 @@
 import time as _time
 
 _T0 = _time.perf_counter()
+
+
+def _now():
+    """Simulated time when the simulator is running (slow motion, pause), else real time."""
+    try:
+        from cutebot_sim import runtime
+    except ImportError:
+        return _time.perf_counter() - _T0
+    rt = runtime._runtime
+    return rt.now() if rt is not None else _time.perf_counter() - _T0
+
+
 _TICKS_PERIOD = 1 << 30   # MicroPython ticks wrap around at 2**30
 
 
@@ -23,11 +35,11 @@ def sleep_us(us):
 
 
 def ticks_ms():
-    return int((_time.perf_counter() - _T0) * 1000) % _TICKS_PERIOD
+    return int(_now() * 1000) % _TICKS_PERIOD
 
 
 def ticks_us():
-    return int((_time.perf_counter() - _T0) * 1_000_000) % _TICKS_PERIOD
+    return int(_now() * 1_000_000) % _TICKS_PERIOD
 
 
 def ticks_add(ticks, delta):

@@ -33,7 +33,7 @@ def sleep(ms):
 
 def running_time():
     """Milliseconds since the program started."""
-    return int((_time.perf_counter() - _rt.t0) * 1000)
+    return int((_rt.now() - _rt.t0) * 1000)
 
 
 def temperature():
@@ -233,6 +233,10 @@ class _Accelerometer:
     def get_values(self):
         """(x, y, z) in milli-g."""
         return tuple(_rt.accel())
+
+    def set_range(self, value):
+        """Sensitivity range in g: rounds to 2, 4 or 8.  Readings stop at +/- the range."""
+        _rt.accel_range = min((2, 4, 8), key=lambda r: abs(r - value))
 
     def get_strength(self):
         """Total acceleration in milli-g (about 1024 when still)."""

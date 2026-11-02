@@ -78,6 +78,7 @@ class Map:
         self.obstacles = [tuple(float(v) for v in o) for o in obstacles]  # (x0, y0, x1, y1)
         self.line_width = float(line_width)
         self.colour = colour
+        self.zones = []          # challenge zones: (kind, x0, y0, x1, y1), kind start/check/finish
         self._hash = None
 
     @property
@@ -86,8 +87,10 @@ class Map:
         return self.lines[0] if self.lines else []
 
     def copy(self):
-        return Map(self.name, self.width, self.height, self.start, self.lines, self.obstacles,
-                   self.line_width, self.colour)
+        m = Map(self.name, self.width, self.height, self.start, self.lines, self.obstacles,
+                self.line_width, self.colour)
+        m.zones = list(self.zones)
+        return m
 
     def invalidate(self):
         self._hash = None
@@ -174,6 +177,9 @@ class Map:
             "obstacles": [{"x": round(x0, 2), "y": round(H - y1, 2),
                            "width": round(x1 - x0, 2), "height": round(y1 - y0, 2)}
                           for x0, y0, x1, y1 in self.obstacles],
+            "zones": [{"type": k, "x": round(x0, 2), "y": round(H - y1, 2),
+                       "width": round(x1 - x0, 2), "height": round(y1 - y0, 2)}
+                      for k, x0, y0, x1, y1 in self.zones],
         }
 
     @classmethod
@@ -195,8 +201,18 @@ class Map:
             y1 = H - float(o["y"])
             if w > 0 and h > 0:
                 obstacles.append((x0, y1 - h, x0 + w, y1))
-        return cls(str(d.get("name", "Custom layout")), W, H, start, lines, obstacles,
-                   float(d.get("line_width", DEFAULT_LINE_WIDTH_CM)))
+        m = cls(str(d.get("name", "Custom layout")), W, H, start, lines, obstacles,
+                float(d.get("line_width", DEFAULT_LINE_WIDTH_CM)))
+        for z in d.get("zones", []):
+            try:
+                kind = str(z["type"])
+                x0, w, h = float(z["x"]), float(z["width"]), float(z["height"])
+                y1 = H - float(z["y"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if kind in ("start", "check", "finish") and w > 0 and h > 0:
+                m.zones.append((kind, x0, y1 - h, x0 + w, y1))
+        return m
 
 
 def _wrap(a):

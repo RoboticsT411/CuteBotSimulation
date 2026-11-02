@@ -27,6 +27,18 @@ def accel_from_tilt(roll_deg, pitch_deg, face_down=False):
     return [x, y, z]
 
 
+def accel_mounted(lean_right_deg, nose_down_deg, faces_forward=True):
+    """Gravity reading (mg) of a micro:bit standing upright on the Cutebot (logo up),
+    with the robot leaning right by ``lean_right`` and nose down by ``nose_down`` degrees.
+    Axes: x across the board, y up the board (toward the logo), z through the display."""
+    r, p = math.radians(lean_right_deg), math.radians(nose_down_deg)
+    f = 1.0 if faces_forward else -1.0
+    x = -1024.0 * f * math.sin(r)
+    y = -1024.0 * math.cos(r) * math.cos(p)
+    z = 1024.0 * f * math.sin(p) * math.cos(r)
+    return [x, y, z]
+
+
 def gesture_from_accel(x, y, z):
     """The orientation gesture for a steady accelerometer reading ('' if in between)."""
     ax, ay, az = abs(x), abs(y), abs(z)

@@ -19,10 +19,11 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from . import maps, reference, robot as R, sensors, shared
+from . import maps, panels, race as race_mod, reference, robot as R, sensors, shared
 
 FRAME_MS = 16
-PANEL_W = 340
+SLIDER_MIN, SLIDER_MAX = 50.0, 150.0     # motor strength sliders (type 0-200 in the box)
+PANEL_W = 372
 BG = "#1F2328"
 PANEL_BG = "#262B31"
 FIELD_BG = "#1B1F24"
@@ -46,15 +47,20 @@ AUTOSAVE_FILE = os.path.join(PROJECT_DIR, "sim_layout.json")
 LAYOUT_DIR = os.path.join(PROJECT_DIR, "layouts")
 
 MODES = [("move", "Move", "1"), ("draw", "Draw line", "2"), ("erase", "Erase", "3"),
-         ("box", "Draw obstacle", "4")]
+         ("box", "Draw obstacle", "4"), ("measure", "Measure", "5")]
 MODE_HINT = {
-    "move": "Drag the robot or an obstacle.  Click an obstacle then press Delete to remove it.",
+    "move": "Drag the robot or an obstacle; drag an edge/corner to resize.  "
+            "Ctrl+C / Ctrl+V copy-paste, Ctrl+D duplicate, Delete removes.",
     "draw": "Drag to draw a line.  Hold Shift for a straight line.  Ends join automatically.",
     "erase": "Drag over a line to erase it.  Click an obstacle to delete it.",
     "box": "Drag a rectangle to create an obstacle.",
+    "measure": "Drag to measure.  Snaps to walls, obstacle edges/corners, robot centre.  "
+               "Shift = straight.  Esc clears.",
+    "zone": "Drag a rectangle for the zone.  Right-click a zone to delete it.  Esc = done.",
 }
-HELP = ("Keys 1-4: tools   Q/E or wheel: rotate 15° (Shift 1°)   R: RESET\n"
-        "A/B: micro:bit buttons   Delete / right-click: delete obstacle   F1: help")
+HELP = ("Keys 1-5 tools   Q/E, wheel: rotate 15° (Shift 1°)   R: RESET\n"
+        "A/B micro:bit buttons   Delete, right-click: delete obstacle\n"
+        "Ctrl+C / V copy-paste   Ctrl+X cut   Ctrl+D duplicate   F1 help")
 
 
 def _rgb(r, g, b):
@@ -109,11 +115,20 @@ class SimWindow:
         self._save_job = None
         self.motor_gain = [1.0, 1.0]
         self.gain_hidden = False
+        self._saved_realism = (False, R.DEFAULT_DEAD_ZONE)
+        self._saved_race = None
+        self._saved_mounted = True
+        self._allow_world = False
         self.trail = []                  # list of segments, each a list of (x, y) internal
         self._trail_items = []
         self.show_trail = None           # tk.BooleanVar, created with the Motors tab
         self._run_gen = None
         self._run_start = None           # pose where the straightness measurement starts
+        self.measure_pts = None          # (p0, p1) of the measure tool, internal frame
+        self.clipboard = None            # (width, height) of a copied obstacle
+        self._paste_from = None          # where the last copy/paste was (internal frame box)
+        self._mouse_w = None             # mouse position over the arena (internal frame)
+        self._gain_updating = False
         self._load_sim_settings()
 
         root.title("Cutebot simulator - LSBU")
@@ -123,7 +138,6 @@ class SimWindow:
 
         # --- left: toolbar + canvas ---------------------------------------------------
         left = tk.Frame(root, bg=BG)
-        left.pack(side="left", fill="both", expand=True)
         bar = tk.Frame(left, bg=BG)
         bar.pack(fill="x", padx=10, pady=(8, 0))
         self.mode = tk.StringVar(value="move")
@@ -133,14 +147,53 @@ class SimWindow:
                            selectcolor="#1F6FEB", activebackground="#3A424D",
                            activeforeground=TEXT, relief="flat", padx=10, pady=4,
                            bd=0, highlightthickness=0).pack(side="left", padx=(0, 4))
-        tk.Button(bar, text="?  micro:bit help (F1)", command=self.open_help, bg="#2D333B", fg=TEXT,
-                  activebackground="#3A424D", activeforeground=TEXT, relief="flat", padx=10, pady=4,
-                  bd=0, highlightthickness=0).pack(side="right", padx=(8, 0))
-        self.coord_label = tk.Label(bar, text="", bg=BG, fg=TEXT, font=("Consolas", 11, "bold"))
+        for text, cmd in (("? Help", self.open_help), ("Radio", self.open_radio),
+                          ("Graphs", self.open_graphs), ("Code", self.open_code)):
+            tk.Button(bar, text=text, command=cmd, bg="#2D333B", fg=TEXT,
+                      activebackground="#3A424D", activeforeground=TEXT, relief="flat", padx=9,
+                      pady=4, bd=0, highlightthickness=0).pack(side="right", padx=(4, 0))
+        row2 = tk.Frame(left, bg=BG)
+        row2.pack(fill="x", padx=12, pady=(4, 0))
+        self.coord_label = tk.Label(row2, text="", bg=BG, fg=TEXT, font=("Consolas", 10, "bold"))
         self.coord_label.pack(side="right")
-        self.hint = tk.Label(left, text=MODE_HINT["move"], bg=BG, fg=MUTED, anchor="w",
-                             font=("Segoe UI", 9))
-        self.hint.pack(fill="x", padx=12, pady=(4, 0))
+        self.hint = tk.Label(row2, text=MODE_HINT["move"], bg=BG, fg=MUTED, anchor="w",
+                             font=("Segoe UI", 9), width=1)
+        self.hint.pack(side="left", fill="x", expand=True)
+
+        # simulation controls: pause, step, slow motion, pause when ...
+        ctl = tk.Frame(left, bg=BG)
+        ctl.pack(fill="x", padx=10, pady=(4, 0))
+        self.pause_btn = tk.Button(ctl, text="Pause (Space)", width=13, command=self.toggle_pause,
+                                   bg="#2D333B", fg=TEXT, activebackground="#3A424D",
+                                   activeforeground=TEXT, relief="flat", bd=0, pady=3)
+        self.pause_btn.pack(side="left")
+        self.step_btn = tk.Button(ctl, text="Step (N)", command=self.step, bg="#2D333B", fg=TEXT,
+                                  activebackground="#3A424D", activeforeground=TEXT, relief="flat",
+                                  bd=0, padx=8, pady=3)
+        self.step_btn.pack(side="left", padx=(4, 10))
+        tk.Label(ctl, text="Speed", bg=BG, fg=MUTED).pack(side="left")
+        self.speed_var = tk.DoubleVar(value=1.0)
+        for value, text in ((0.1, "0.1x"), (0.25, "0.25x"), (0.5, "0.5x"), (1.0, "1x"), (2.0, "2x"),
+                            (4.0, "4x")):
+            tk.Radiobutton(ctl, text=text, value=value, variable=self.speed_var, indicatoron=0,
+                           command=self._sim_ui_changed, bg="#2D333B", fg=TEXT,
+                           selectcolor="#1F6FEB", activebackground="#3A424D", activeforeground=TEXT,
+                           relief="flat", bd=0, padx=7, pady=3).pack(side="left", padx=1)
+        self.pause_on_btn = tk.Menubutton(ctl, text="Pause on \u25be", bg="#2D333B", fg=TEXT,
+                                          activebackground="#3A424D", activeforeground=TEXT,
+                                          relief="flat", bd=0, padx=8, pady=3)
+        self.pause_on_btn.pack(side="left", padx=(10, 0))
+        menu = tk.Menu(self.pause_on_btn, tearoff=0)
+        self.pause_on_btn.configure(menu=menu)
+        self.pause_on_vars = []
+        for bit, text in ((1, "motor speeds change"), (2, "a line sensor changes"),
+                          (4, "the robot bumps into something")):
+            v = tk.BooleanVar(value=False)
+            menu.add_checkbutton(label=text, variable=v, command=self._sim_ui_changed)
+            self.pause_on_vars.append((bit, v))
+        self.paused = False
+        self.pause_reason = ""
+        self._auto_seen = 0
 
         self.canvas = tk.Canvas(left, bg=BG, highlightthickness=0, cursor="crosshair")
         self.canvas.pack(fill="both", expand=True)
@@ -149,6 +202,7 @@ class SimWindow:
         panel = tk.Frame(root, bg=PANEL_BG, width=PANEL_W)
         panel.pack(side="right", fill="y")
         panel.pack_propagate(False)
+        left.pack(side="left", fill="both", expand=True)     # after the panel: panel keeps its width
 
         self.board = tk.Canvas(panel, width=PANEL_W - 20, height=180, bg=PANEL_BG,
                                highlightthickness=0)
@@ -173,6 +227,8 @@ class SimWindow:
         self._build_obstacle_tab()
         self._build_arena_tab()
         self._build_sensor_tab()
+        self.race = race_mod.Race(self, self._tab("Race"))
+        self.race.load_settings(self._saved_race)
 
         tk.Label(panel, text=HELP, bg=PANEL_BG, fg=MUTED, justify="left", anchor="w",
                  font=("Segoe UI", 8)).pack(fill="x", padx=10, pady=(0, 8))
@@ -193,11 +249,16 @@ class SimWindow:
         root.bind("<KeyRelease>", self._on_key_up)
         root.bind("<F1>", lambda e: self.open_help())
         self._help = None
+        self._code_win = self._graph_win = self._radio_win = None
+        self._tx_pos = 0
+        self.radio_log = []              # recent radio messages for the console
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self._world_changed(save=False)
         self._publish_gain()
+        self._publish_realism()
         self._publish_sensors()
+        self._publish_sim_controls()
         self._tick()
 
     # =====================================================================================
@@ -309,16 +370,53 @@ class SimWindow:
                          padx=6, pady=2)
 
     def _tab(self, title):
-        f = tk.Frame(self.tabs, bg=PANEL_BG)
-        self.tabs.add(f, text=f"  {title}  ")
-        return f
+        """A tab whose content scrolls when it does not fit (large fonts, small screens)."""
+        outer = tk.Frame(self.tabs, bg=PANEL_BG)
+        self.tabs.add(outer, text=f" {title} ")
+        canvas = tk.Canvas(outer, bg=PANEL_BG, highlightthickness=0, bd=0)
+        sb = tk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        inner = tk.Frame(canvas, bg=PANEL_BG)
+        win = canvas.create_window(0, 0, window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=sb.set)
+        canvas.pack(side="left", fill="both", expand=True)
+
+        def fit(_e=None):
+            canvas.itemconfigure(win, width=canvas.winfo_width())
+            h = inner.winfo_reqheight()
+            canvas.configure(scrollregion=(0, 0, canvas.winfo_width(), h))
+            need = h > canvas.winfo_height() + 1
+            if need and not sb.winfo_ismapped():
+                sb.pack(side="right", fill="y", before=canvas)
+            elif not need and sb.winfo_ismapped():
+                sb.pack_forget()
+                canvas.yview_moveto(0)
+
+        def wheel(e):
+            if not sb.winfo_ismapped():
+                return
+            up = getattr(e, "delta", 0) > 0 or getattr(e, "num", 0) == 4
+            canvas.yview_scroll(-2 if up else 2, "units")
+
+        def enter(_e):
+            for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                self.root.bind_all(ev, wheel)
+
+        def leave(_e):
+            for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                self.root.unbind_all(ev)
+
+        inner.bind("<Configure>", fit)
+        canvas.bind("<Configure>", fit)
+        outer.bind("<Enter>", enter)
+        outer.bind("<Leave>", leave)
+        return inner
 
     def _typing(self):
         try:
             w = self.root.focus_get()
         except (KeyError, tk.TclError):
             return False
-        return isinstance(w, (tk.Entry, ttk.Entry))
+        return isinstance(w, (tk.Entry, ttk.Entry, tk.Spinbox))
 
     # =====================================================================================
     # Robot tab
@@ -398,8 +496,10 @@ class SimWindow:
         self._field(grid, "height", 1, 2, self.obs_entries, "h")
         self._set_entry(self.obs_entries["w"], 10)
         self._set_entry(self.obs_entries["h"], 5)
-        self._btn(grid, "Add", self._add_obstacle_from_fields).grid(row=0, column=4, rowspan=2,
-                                                                    sticky="ns", padx=(8, 0), pady=3)
+        self._btn(grid, "Add new", self._add_obstacle_from_fields).grid(row=0, column=4, sticky="we",
+                                                                        padx=(8, 0), pady=2)
+        self._btn(grid, "Update selected", self._update_selected).grid(row=1, column=4, sticky="we",
+                                                                       padx=(8, 0), pady=2)
         for e in self.obs_entries.values():
             e.bind("<Return>", lambda _e: self._add_obstacle_from_fields())
 
@@ -407,13 +507,13 @@ class SimWindow:
                                    selectbackground="#40505F", font=("Consolas", 9),
                                    activestyle="none", exportselection=False)
         self.obs_list.pack(fill="both", expand=True, padx=6, pady=(4, 2))
-        self.obs_list.bind("<<ListboxSelect>>", lambda e: self._draw_map())
+        self.obs_list.bind("<<ListboxSelect>>", lambda e: self._on_obs_select())
         row = tk.Frame(f, bg=PANEL_BG)
         row.pack(fill="x", padx=6, pady=2)
         self._btn(row, "Delete selected", self._remove_selected).pack(side="left")
         self._btn(row, "Clear all", self._clear_obstacles).pack(side="left", padx=6)
-        self.obs_msg = tk.Label(f, text="Or use tool 4 to drag out an obstacle,\n"
-                                        "and tool 1 to move one.",
+        self.obs_msg = tk.Label(f, text="Tool 4 draws an obstacle. Tool 1 moves it, or drag\n"
+                                        "its edge/corner to resize. Green lines = gaps (cm).",
                                 bg=PANEL_BG, fg=MUTED, anchor="w", justify="left")
         self.obs_msg.pack(fill="x", padx=6, pady=(0, 4))
 
@@ -428,6 +528,47 @@ class SimWindow:
             return
         x0, y1 = self.from_user(ux, uy)
         self._add_obstacle((x0, y1 - h, x0 + w, y1))
+        self.root.focus_set()
+
+    def _on_obs_select(self, redraw=True):
+        """Show the selected obstacle's corner and size in the fields."""
+        sel = self.obs_list.curselection()
+        if sel and sel[0] < len(self.world.obstacles):
+            x0, y0, x1, y1 = self.world.obstacles[sel[0]]
+            ux, uy = self.to_user(x0, y1)
+            for k, v in (("x", ux), ("y", uy), ("w", x1 - x0), ("h", y1 - y0)):
+                self._set_entry(self.obs_entries[k], self._fmt_cm(v))
+        if redraw:
+            self._draw_map()
+
+    def _update_selected(self):
+        sel = self.obs_list.curselection()
+        if not sel:
+            self.obs_msg.configure(text="Select an obstacle first (in the list or on the arena)",
+                                   fg=ERR)
+            return
+        try:
+            ux = self._num(self.obs_entries["x"], "x")
+            uy = self._num(self.obs_entries["y"], "y")
+            w = self._num(self.obs_entries["w"], "width")
+            h = self._num(self.obs_entries["h"], "height")
+        except ValueError as e:
+            self.obs_msg.configure(text=str(e), fg=ERR)
+            return
+        m = self.world
+        if w < 0.5 or h < 0.5:
+            self.obs_msg.configure(text="Width and height must be at least 0.5 cm", fg=ERR)
+            return
+        x0, y1 = self.from_user(ux, uy)
+        box = (max(0.0, x0), max(0.0, y1 - h), min(m.width, x0 + w), min(m.height, y1))
+        if box[2] - box[0] < 0.5 or box[3] - box[1] < 0.5:
+            self.obs_msg.configure(text="That obstacle is outside the arena", fg=ERR)
+            return
+        i = sel[0]
+        m.obstacles[i] = box
+        self.obs_msg.configure(text=f"Updated obstacle {i + 1}: "
+                                    f"{box[2] - box[0]:g} x {box[3] - box[1]:g} cm", fg=OK)
+        self._world_changed()
         self.root.focus_set()
 
     def _add_obstacle(self, box):
@@ -560,6 +701,8 @@ class SimWindow:
             if b[2] - b[0] >= 0.5 and b[3] - b[1] >= 0.5:
                 boxes.append(b)
         m.obstacles = boxes
+        m.zones = [(k, x0, max(0.0, y0 + dh), min(x1, w), min(y1 + dh, h))
+                   for k, x0, y0, x1, y1 in m.zones]
         sx, sy, sh = m.start
         m.width, m.height, m.line_width = w, h, lw
         m.start = (min(sx, w), min(max(sy + dh, 0.0), h), sh)
@@ -645,6 +788,13 @@ class SimWindow:
     # world publishing / saving
     # =====================================================================================
     def _world_changed(self, redraw=True, save=True):
+        r = getattr(self, "race", None)
+        if r is not None and r.locked() and not self._allow_world:
+            cw = r.course_world()                 # the teacher's course cannot be edited
+            if cw is not None:
+                cw.start = self.world.start
+                self.world = cw
+                self.coord_label.configure(text="The course is set by the teacher")
         self.world.invalidate()
         try:
             shared.write_world(self.sh, self.world)
@@ -695,15 +845,33 @@ class SimWindow:
         x1, y1 = self.w2s(m.width, m.height)
         c.create_rectangle(x0 - 6, y0 - 6, x1 + 6, y1 + 6, fill="#5A4632", outline="")
         c.create_rectangle(x0, y0, x1, y1, fill=m.colour, outline="")
-        step = 10 if m.width <= 250 and m.height <= 250 else 20
-        for gx in range(step, int(m.width) + 1, step):
+        # grid: fine lines every 1 cm (5 cm if the arena is too big to see them),
+        # strong lines every 10 cm, numbers along the edges
+        minor = 1 if s >= 3 else 5 if s * 5 >= 5 else 0
+        major = 10
+        if minor:
+            for gx in range(minor, int(m.width) + 1, minor):
+                if gx < m.width and gx % major:
+                    sx, _ = self.w2s(gx, 0)
+                    c.create_line(sx, y0, sx, y1, fill="#DADDD8" if gx % 5 else "#CDD1CB")
+            for gy in range(minor, int(m.height) + 1, minor):
+                if gy < m.height and gy % major:
+                    _, sy = self.w2s(0, m.height - gy)
+                    c.create_line(x0, sy, x1, sy, fill="#DADDD8" if gy % 5 else "#CDD1CB")
+        label_every = next(n for n in (10, 20, 50, 100, 200) if n * s >= 28)
+        for gx in range(major, int(m.width) + 1, major):
+            sx, _ = self.w2s(gx, 0)
             if gx < m.width:
-                sx, _ = self.w2s(gx, 0)
-                c.create_line(sx, y0, sx, y1, fill="#DCDFDA")
-        for gy in range(step, int(m.height) + 1, step):
+                c.create_line(sx, y0, sx, y1, fill="#AEB4AC")
+            if gx % label_every == 0:
+                c.create_text(sx, y0 - 8, text=str(gx), fill=MUTED, font=("Segoe UI", 7), anchor="s")
+        for gy in range(major, int(m.height) + 1, major):
+            _, sy = self.w2s(0, m.height - gy)
             if gy < m.height:
-                _, sy = self.w2s(0, m.height - gy)
-                c.create_line(x0, sy, x1, sy, fill="#DCDFDA")
+                c.create_line(x0, sy, x1, sy, fill="#AEB4AC")
+            if gy % label_every == 0:
+                c.create_text(x0 - 8, sy, text=str(gy), fill=MUTED, font=("Segoe UI", 7), anchor="e")
+        step = minor or major
         lw = max(1, m.line_width * s)
         for stroke in m.lines:
             pts = []
@@ -728,9 +896,17 @@ class SimWindow:
         c.create_text(x0 + 4, y1 - 42, text="y", fill="#27AE60", anchor="w",
                       font=("Segoe UI", 9, "bold"))
         c.create_text(x0, y1 + 16, anchor="w", fill=MUTED, font=("Segoe UI", 9),
-                      text=f"{m.width:g} x {m.height:g} cm   grid {step} cm   origin bottom-left")
+                      text=f"{m.width:g} x {m.height:g} cm   small squares {step} cm, "
+                           f"bold lines every {major} cm   origin bottom-left")
+        if hasattr(self, "race"):
+            self.race.draw_zones(c)
+        if sel and sel[0] < len(m.obstacles):
+            self._draw_gaps(sel[0])
+        self._draw_measure()
         self._trail_items = []
         self._draw_trail(full=True)
+        if hasattr(self, "race"):
+            self.race.after_redraw()
 
     def _make_robot_items(self):
         c = self.canvas
@@ -823,8 +999,10 @@ class SimWindow:
         m = self.world
         inside = 0 <= wx <= m.width and 0 <= wy <= m.height
         if not inside:
+            self._mouse_w = None
             self._hide_hover()
             return
+        self._mouse_w = (wx, wy)
         ux, uy = self.to_user(wx, wy)
         text = f"x {ux:5.1f}  y {uy:5.1f} cm"
         self.coord_label.configure(text=text)
@@ -856,10 +1034,16 @@ class SimWindow:
             c.tag_raise(item)
         if self.mode.get() == "move" and self.drag is None:
             x, y, _ = self._current_pose()
-            grab = math.hypot(wx - x, wy - y) < ROBOT_GRAB_CM or self._obstacle_at(wx, wy) is not None
-            c.configure(cursor="fleur" if grab else "crosshair")
+            handle = self._resize_handle(e.x, e.y)
+            if handle and math.hypot(wx - x, wy - y) >= ROBOT_GRAB_CM:
+                c.configure(cursor=self.RESIZE_CURSOR[handle[1]])
+            else:
+                grab = (math.hypot(wx - x, wy - y) < ROBOT_GRAB_CM
+                        or self._obstacle_at(wx, wy) is not None)
+                c.configure(cursor="fleur" if grab else "crosshair")
 
     def _hide_hover(self):
+        self._mouse_w = None
         self.coord_label.configure(text="")
         if self._hover_items:
             for item in self._hover_items:
@@ -874,13 +1058,167 @@ class SimWindow:
                         self.canvas.create_line(sx, sy - 7, sx, sy + 7, fill="#E5534B", width=2))
 
     # =====================================================================================
+    # measuring: measure tool, gaps around the selected obstacle, resize handles
+    # =====================================================================================
+    @staticmethod
+    def _fmt_cm(v):
+        t = f"{v:.1f}"
+        return t[:-2] if t.endswith(".0") else t
+
+    def _label(self, sx, sy, text, fg="#0B4F8A", tag="measure", side=None):
+        """A small white label.  ``side`` = (nx, ny): place it beside the point in that
+        direction (so it does not cover a line) instead of centred on it."""
+        c = self.canvas
+        t = c.create_text(sx, sy, text=text, fill=fg, font=("Segoe UI", 8, "bold"), tags=tag)
+        bx = c.bbox(t)
+        if bx and side is not None:
+            nx, ny = side
+            w, h = bx[2] - bx[0], bx[3] - bx[1]
+            d = 5 + abs(nx) * w / 2 + abs(ny) * h / 2       # clear of the line
+            c.move(t, nx * d, ny * d)
+            bx = c.bbox(t)
+        if bx:
+            r = c.create_rectangle(bx[0] - 3, bx[1] - 1, bx[2] + 3, bx[3] + 1, fill="#FFFFFF",
+                                   outline="#8FB8DE", tags=tag)
+            c.tag_lower(r, t)
+
+    def _dim_line(self, p, q, text, colour="#1F6FEB", tag="measure", dash=(4, 2)):
+        a, b = self.w2s(*p), self.w2s(*q)
+        self.canvas.create_line(*a, *b, fill=colour, width=2, arrow="both", arrowshape=(7, 8, 3),
+                                dash=dash, tags=tag)
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        length = math.hypot(dx, dy) or 1.0
+        nx, ny = -dy / length, dx / length                     # perpendicular to the line
+        if ny > 0.01 or (abs(ny) <= 0.01 and nx < 0):
+            nx, ny = -nx, -ny                                  # above the line, or to its right
+        self._label((a[0] + b[0]) / 2, (a[1] + b[1]) / 2, text, tag=tag, side=(nx, ny))
+
+    def _draw_gaps(self, i):
+        """Distances from each side of obstacle ``i`` to the nearest wall or obstacle."""
+        m = self.world
+        x0, y0, x1, y1 = m.obstacles[i]
+        others = [o for j, o in enumerate(m.obstacles) if j != i]
+
+        def overlap(a0, a1, b0, b1):
+            return min(a1, b1) - max(a0, b0) > 1e-6
+
+        def mid(a0, a1, b0, b1):
+            return (max(a0, b0) + min(a1, b1)) / 2
+
+        eps = 1e-6
+        # (gap, start point, end point) for left, right, top, bottom (internal frame)
+        left = [(x0 - o[2], mid(y0, y1, o[1], o[3])) for o in others
+                if o[2] <= x0 + eps and overlap(y0, y1, o[1], o[3])]
+        g, yy = min(left) if left else (x0, (y0 + y1) / 2)
+        sides = [(g, (x0 - g, yy), (x0, yy))]
+        right = [(o[0] - x1, mid(y0, y1, o[1], o[3])) for o in others
+                 if o[0] >= x1 - eps and overlap(y0, y1, o[1], o[3])]
+        g, yy = min(right) if right else (m.width - x1, (y0 + y1) / 2)
+        sides.append((g, (x1, yy), (x1 + g, yy)))
+        up = [(y0 - o[3], mid(x0, x1, o[0], o[2])) for o in others
+              if o[3] <= y0 + eps and overlap(x0, x1, o[0], o[2])]
+        g, xx = min(up) if up else (y0, (x0 + x1) / 2)
+        sides.append((g, (xx, y0 - g), (xx, y0)))
+        down = [(o[1] - y1, mid(x0, x1, o[0], o[2])) for o in others
+                if o[1] >= y1 - eps and overlap(x0, x1, o[0], o[2])]
+        g, xx = min(down) if down else (m.height - y1, (x0 + x1) / 2)
+        sides.append((g, (xx, y1), (xx, y1 + g)))
+        for g, p, q in sides:
+            if g > 0.05:
+                self._dim_line(p, q, self._fmt_cm(g), colour="#2E7D32", tag="gaps", dash=())
+
+    def _draw_measure(self):
+        self.canvas.delete("measure")
+        if not self.measure_pts:
+            return
+        p, q = self.measure_pts
+        (ux0, uy0), (ux1, uy1) = self.to_user(*p), self.to_user(*q)
+        dx, dy = ux1 - ux0, uy1 - uy0
+        dist = math.hypot(dx, dy)
+        if dist < 0.05:
+            return
+        c = self.canvas
+        if abs(dx) > 0.5 and abs(dy) > 0.5:      # the two legs, for x / y distances
+            corner = self.w2s(q[0], p[1])
+            c.create_line(*self.w2s(*p), *corner, *self.w2s(*q), fill="#7FA7D6", dash=(2, 3),
+                          tags="measure")
+        for pt in (p, q):
+            sx, sy = self.w2s(*pt)
+            c.create_oval(sx - 3, sy - 3, sx + 3, sy + 3, fill="#1F6FEB", outline="", tags="measure")
+        text = f"{self._fmt_cm(dist)} cm"
+        if abs(dx) >= 0.5 and abs(dy) >= 0.5:
+            ang = math.degrees(math.atan2(dy, dx))
+            text += f"\ndx {self._fmt_cm(abs(dx))}  dy {self._fmt_cm(abs(dy))}  {ang:.0f}\u00b0"
+        self._dim_line(p, q, text)
+
+    def _measure_snap(self, wx, wy):
+        """Snap to robot centre / obstacle corners, then to walls and obstacle edges."""
+        m = self.world
+        tol = 8.0 / max(self.scale, 0.1)
+        rx, ry, _ = self._current_pose()
+        points = [(rx, ry)] + [(x, y) for (x0, y0, x1, y1) in m.obstacles
+                               for x in (x0, x1) for y in (y0, y1)]
+        best = min(points, key=lambda pt: math.hypot(pt[0] - wx, pt[1] - wy))
+        if math.hypot(best[0] - wx, best[1] - wy) <= tol:
+            return best
+        xs, ys = [0.0, m.width], [0.0, m.height]
+        for x0, y0, x1, y1 in m.obstacles:
+            if y0 - tol <= wy <= y1 + tol:
+                xs += [x0, x1]
+            if x0 - tol <= wx <= x1 + tol:
+                ys += [y0, y1]
+        bx = min(xs, key=lambda v: abs(v - wx))
+        by = min(ys, key=lambda v: abs(v - wy))
+        if abs(bx - wx) <= tol:
+            wx = bx
+        if abs(by - wy) <= tol:
+            wy = by
+        return self._clamp_in(wx, wy)
+
+    def _resize_handle(self, sx, sy):
+        """(obstacle index, sides) if the screen point is on an obstacle edge/corner."""
+        obs = self.world.obstacles
+        sel = self.obs_list.curselection()
+        order = list(range(len(obs) - 1, -1, -1))
+        if sel and sel[0] < len(obs):
+            order.remove(sel[0])
+            order.insert(0, sel[0])               # the selected obstacle wins
+        for i in order:
+            a, b = self.w2s(obs[i][0], obs[i][1])
+            cc, d = self.w2s(obs[i][2], obs[i][3])
+            tx = min(6.0, (cc - a) / 4)           # small obstacles: mostly outside the edge
+            ty = min(6.0, (d - b) / 4)
+            if not (a - 6 <= sx <= cc + 6 and b - 6 <= sy <= d + 6):
+                continue
+            sides = ""
+            if abs(sx - a) <= max(tx, 3) and sx <= a + tx:
+                sides += "l"
+            elif abs(sx - cc) <= max(tx, 3) and sx >= cc - tx:
+                sides += "r"
+            if abs(sy - b) <= max(ty, 3) and sy <= b + ty:
+                sides += "t"
+            elif abs(sy - d) <= max(ty, 3) and sy >= d - ty:
+                sides += "b"
+            if sides:
+                return i, sides
+        return None
+
+    RESIZE_CURSOR = {"l": "sb_h_double_arrow", "r": "sb_h_double_arrow",
+                     "t": "sb_v_double_arrow", "b": "sb_v_double_arrow",
+                     "lt": "top_left_corner", "rb": "bottom_right_corner",
+                     "rt": "top_right_corner", "lb": "bottom_left_corner"}
+
+    # =====================================================================================
     # mouse tools
     # =====================================================================================
     def _on_mode(self):
         self.drag = None
         mode = self.mode.get()
+        if mode != "zone" and hasattr(self, "race"):
+            self.race.zone_kind = None
         self.hint.configure(text=MODE_HINT[mode])
-        self.canvas.configure(cursor={"draw": "pencil", "erase": "circle", "box": "tcross"}
+        self.canvas.configure(cursor={"draw": "pencil", "erase": "circle", "box": "tcross",
+                                      "zone": "tcross"}
                               .get(mode, "crosshair"))
         self.root.focus_set()
 
@@ -894,15 +1232,26 @@ class SimWindow:
             if math.hypot(wx - x, wy - y) < ROBOT_GRAB_CM:
                 self.drag = ("robot", wx - x, wy - y, h)
                 return
+            handle = self._resize_handle(e.x, e.y)
+            if handle:
+                i, sides = handle
+                self.drag = ("resize", i, sides)
+                self.obs_list.selection_clear(0, "end")
+                self.obs_list.selection_set(i)
+                self._on_obs_select()
+                return
             i = self._obstacle_at(wx, wy)
             if i is not None:
                 x0, y0, _, _ = self.world.obstacles[i]
                 self.drag = ("obstacle", i, wx - x0, wy - y0)
                 self.obs_list.selection_clear(0, "end")
                 self.obs_list.selection_set(i)
-                self._draw_map()
+                self._on_obs_select()
                 return
             if 0 <= wx <= self.world.width and 0 <= wy <= self.world.height:
+                if self.obs_list.curselection():
+                    self.obs_list.selection_clear(0, "end")
+                    self._draw_map()
                 ux, uy = self.to_user(wx, wy)
                 self._set_entry(self.obs_entries["x"], round(ux))
                 self._set_entry(self.obs_entries["y"], round(uy))
@@ -927,6 +1276,18 @@ class SimWindow:
             item = self.canvas.create_rectangle(sx, sy, sx, sy, fill=OBST_FILL, outline=OBST_EDGE,
                                                 width=2, stipple="gray50")
             self.drag = ("box", p, item)
+        elif mode == "zone":
+            p = self._snap_user(*self._clamp_in(wx, wy))
+            sx, sy = self.w2s(*p)
+            colour = race_mod.ZONE_STYLE[self.race.zone_kind or "check"][0]
+            item = self.canvas.create_rectangle(sx, sy, sx, sy, outline=colour, width=2,
+                                                dash=(6, 3), fill=colour, stipple="gray25")
+            self.drag = ("zone", p, item)
+        elif mode == "measure":
+            p = self._measure_snap(wx, wy)
+            self.measure_pts = (p, p)
+            self.drag = ("measure", p)
+            self._draw_measure()
 
     def _on_drag(self, e):
         self._on_hover(e)
@@ -971,7 +1332,41 @@ class SimWindow:
                 self.canvas.coords(item, *coords)
         elif kind == "erase":
             self._erase_at(wx, wy)
-        elif kind == "box":
+        elif kind == "measure":
+            p0 = self.drag[1]
+            if e.state & 0x0001:                  # Shift: straight across or straight up
+                if abs(wx - p0[0]) >= abs(wy - p0[1]):
+                    wy = p0[1]
+                else:
+                    wx = p0[0]
+                p1 = self._clamp_in(wx, wy)
+                snapped = self._measure_snap(*p1)
+                p1 = (snapped[0], p0[1]) if p1[1] == p0[1] else (p0[0], snapped[1])
+            else:
+                p1 = self._measure_snap(wx, wy)
+            self.measure_pts = (p0, p1)
+            (a, b), (cx, cy) = self.to_user(*p0), self.to_user(*p1)
+            self.coord_label.configure(text=f"Distance {math.hypot(cx - a, cy - b):.1f} cm")
+            self._draw_measure()
+        elif kind == "resize":
+            _, i, sides = self.drag
+            m = self.world
+            x0, y0, x1, y1 = m.obstacles[i]
+            ux, uy = self.to_user(*self._clamp_in(wx, wy))
+            nx, ny = self.from_user(round(ux), round(uy))       # whole centimetres
+            if "l" in sides:
+                x0 = min(nx, x1 - 1.0)
+            if "r" in sides:
+                x1 = max(nx, x0 + 1.0)
+            if "t" in sides:
+                y0 = min(ny, y1 - 1.0)
+            if "b" in sides:
+                y1 = max(ny, y0 + 1.0)
+            m.obstacles[i] = (max(0.0, x0), max(0.0, y0), min(m.width, x1), min(m.height, y1))
+            self.coord_label.configure(text=f"Obstacle {i + 1}: {x1 - x0:g} x {y1 - y0:g} cm")
+            self._world_changed()
+            self._on_obs_select(redraw=False)
+        elif kind in ("box", "zone"):
             _, p0, item = self.drag
             p1 = self._snap_user(*self._clamp_in(wx, wy))
             a, b = self.w2s(*p0), self.w2s(*p1)
@@ -996,16 +1391,32 @@ class SimWindow:
             box = (min(p0[0], p1[0]), min(p0[1], p1[1]), max(p0[0], p1[0]), max(p0[1], p1[1]))
             if box[2] - box[0] >= 1 and box[3] - box[1] >= 1:
                 self._add_obstacle(box)
+        elif kind == "zone":
+            _, p0, item = drag
+            self.canvas.delete(item)
+            p1 = self._snap_user(*self._clamp_in(*self.s2w(e.x, e.y)))
+            box = (min(p0[0], p1[0]), min(p0[1], p1[1]), max(p0[0], p1[0]), max(p0[1], p1[1]))
+            if box[2] - box[0] >= 2 and box[3] - box[1] >= 2 and self.race.zone_kind:
+                self.race.add_zone(self.race.zone_kind, box)
         elif kind == "erase":
             self._world_changed()
-        elif kind == "obstacle":
+        elif kind in ("obstacle", "resize"):
             self._world_changed()
+            self._on_obs_select(redraw=False)
 
     def _snap_user(self, x, y):
         ux, uy = self.to_user(x, y)
         return self.from_user(round(ux), round(uy))
 
     def _on_right_click(self, e):
+        if self.mode.get() == "zone":
+            if not self.race.locked():
+                self.race.delete_zone_at(*self.s2w(e.x, e.y))
+            return
+        if self.mode.get() == "measure":
+            self.measure_pts = None
+            self._draw_measure()
+            return
         wx, wy = self.s2w(e.x, e.y)
         i = self._obstacle_at(wx, wy)
         if i is not None:
@@ -1085,6 +1496,71 @@ class SimWindow:
             self._world_changed(save=False)
 
     # =====================================================================================
+    # copy / paste obstacles (Ctrl+C, Ctrl+X, Ctrl+V, Ctrl+D)
+    # =====================================================================================
+    def _selected_obstacle(self):
+        sel = self.obs_list.curselection()
+        if sel and sel[0] < len(self.world.obstacles):
+            return sel[0]
+        self.obs_msg.configure(text="Click an obstacle first (tool 1), then Ctrl+C", fg=ERR)
+        self.coord_label.configure(text="Select an obstacle first")
+        return None
+
+    def _copy_obstacle(self):
+        i = self._selected_obstacle()
+        if i is None:
+            return False
+        x0, y0, x1, y1 = self.world.obstacles[i]
+        self.clipboard = (x1 - x0, y1 - y0)
+        self._paste_from = (x0, y0, x1, y1)
+        msg = f"Copied obstacle {i + 1} ({x1 - x0:g} x {y1 - y0:g} cm) - Ctrl+V to paste"
+        self.obs_msg.configure(text=msg, fg=OK)
+        self.coord_label.configure(text=f"Copied {x1 - x0:g} x {y1 - y0:g} cm")
+        return True
+
+    def _cut_obstacle(self):
+        i = self.obs_list.curselection()
+        if self._copy_obstacle():
+            self._delete_obstacle(i[0])
+            self._paste_from = None               # paste at the mouse (or where it was)
+
+    def _paste_obstacle(self):
+        if not self.clipboard:
+            self.coord_label.configure(text="Nothing copied - select an obstacle, Ctrl+C")
+            return
+        w, h = self.clipboard
+        m = self.world
+        if self._mouse_w is not None:
+            # centre the copy on the mouse
+            cx, cy = self._mouse_w
+            x0, y0 = cx - w / 2, cy - h / 2
+        elif self._paste_from is not None:
+            # next to the last one: 2 cm right and 2 cm down
+            x0, y0 = self._paste_from[0] + 2, self._paste_from[1] + 2
+        else:
+            x0, y0 = (m.width - w) / 2, (m.height - h) / 2
+        # whole centimetres, inside the arena
+        ux, uy = self.to_user(x0, y0 + h)
+        x0, y1 = self.from_user(round(ux), round(uy))
+        x0 = min(max(x0, 0.0), max(m.width - w, 0.0))
+        y1 = min(max(y1, h), m.height)
+        box = (x0, y1 - h, x0 + w, y1)
+        if self._add_obstacle(box):
+            i = len(m.obstacles) - 1
+            self._paste_from = m.obstacles[i]
+            self.obs_list.selection_clear(0, "end")
+            self.obs_list.selection_set(i)
+            self._on_obs_select()
+            ux, uy = self.to_user(box[0], box[3])
+            self.coord_label.configure(text=f"Pasted obstacle {i + 1} at x {ux:g}  y {uy:g}")
+
+    def _duplicate_obstacle(self):
+        if self._copy_obstacle():
+            mouse, self._mouse_w = self._mouse_w, None      # always next to the original
+            self._paste_obstacle()
+            self._mouse_w = mouse
+
+    # =====================================================================================
     # robot pose
     # =====================================================================================
     def _program_live(self):
@@ -1099,12 +1575,16 @@ class SimWindow:
         return tuple(self.world.start)
 
     def _request_pose(self, x, y, h):
+        if hasattr(self, "race"):
+            self.race.hand_moved()
         self.sh.set("pose_req", (x, y, h))
         self.sh.bump("pose_req_seq")
         self._preview_pose = (x, y, h)
         self._preview_t = time.time()
 
     def _reset_pose(self):
+        if hasattr(self, "race"):
+            self.race.hand_moved()
         self.sh.set("pose_req", (float("nan"), 0.0, 0.0))
         self.sh.bump("pose_req_seq")
         self._preview_pose = tuple(self.world.start)
@@ -1125,6 +1605,10 @@ class SimWindow:
         if self._typing():
             return
         k = (e.keysym or "").lower()
+        if e.state & 0x0004:                      # Ctrl: copy / cut / paste / duplicate obstacles
+            {"c": self._copy_obstacle, "x": self._cut_obstacle, "v": self._paste_obstacle,
+             "d": self._duplicate_obstacle}.get(k, lambda: None)()
+            return
         if k in ("a", "b"):
             if k not in self.keys_down:
                 self.keys_down.add(k)
@@ -1132,9 +1616,13 @@ class SimWindow:
         elif k == "r":
             self._press_reset(True)
             self.root.after(120, lambda: self._press_reset(False))
+        elif k == "space":
+            self.toggle_pause()
+        elif k == "n":
+            self.step()
         elif k in ("q", "e"):
             self._rotate_ccw(self._step(e) * (1 if k == "q" else -1))
-        elif k in ("1", "2", "3", "4"):
+        elif k in ("1", "2", "3", "4", "5"):
             self.mode.set(MODES[int(k) - 1][0])
             self._on_mode()
         elif k in ("delete", "backspace"):
@@ -1142,6 +1630,7 @@ class SimWindow:
             if sel:
                 self._delete_obstacle(sel[0])
         elif k == "escape":
+            self.measure_pts = None
             self.mode.set("move")
             self._on_mode()
             self._draw_map()
@@ -1164,27 +1653,74 @@ class SimWindow:
     # =====================================================================================
     def _build_motor_tab(self):
         f = self._tab("Motors")
-        tk.Label(f, text="Motor strength, % (simulation only - your code\n"
-                         "is not changed). 100 = exact; 92 = 8 % slower.",
-                 bg=PANEL_BG, fg=MUTED, anchor="w", justify="left").pack(fill="x", padx=6, pady=(8, 0))
+        tk.Label(f, text="Wheel strength %  (100 = exact, 92 = 8 % slower)",
+                 bg=PANEL_BG, fg=MUTED, anchor="w", justify="left").pack(fill="x", padx=6, pady=(6, 0))
         grid = tk.Frame(f, bg=PANEL_BG)
-        grid.pack(fill="x", padx=2)
-        self.gain_entries = {}
-        self._field(grid, "left %", 0, 0, self.gain_entries, "l")
-        self._field(grid, "right %", 0, 2, self.gain_entries, "r")
-        self._btn(grid, "Apply", self._apply_gain).grid(row=0, column=4, padx=(8, 0))
-        for e in self.gain_entries.values():
+        grid.pack(fill="x", padx=2, pady=(2, 0))
+        self.gain_entries, self.gain_scales, self.gain_vars = {}, {}, {}
+        for row_i, (key, name) in enumerate((("l", "Left"), ("r", "Right"))):
+            tk.Label(grid, text=name, bg=PANEL_BG, fg=MUTED, width=5, anchor="e").grid(
+                row=row_i, column=0, padx=(4, 2))
+            var = tk.DoubleVar(value=100.0)
+            minus = tk.Button(grid, text="\u2212", width=2, command=lambda k=key: self._nudge_gain(k, -0.5),
+                              repeatdelay=400, repeatinterval=80, bg="#33404D", fg=TEXT, relief="flat",
+                              activebackground="#40505F", activeforeground=TEXT, padx=0, pady=0)
+            minus.grid(row=row_i, column=1, padx=(0, 2))
+            sc = tk.Scale(grid, from_=SLIDER_MIN, to=SLIDER_MAX, resolution=0.1, orient="horizontal",
+                          variable=var, showvalue=0, length=150, sliderlength=12, bigincrement=1,
+                          bg=PANEL_BG, fg=TEXT, troughcolor=FIELD_BG, highlightthickness=0, bd=0,
+                          activebackground=ACCENT,
+                          command=lambda _v, k=key: self._on_gain_slider(k))
+            sc.grid(row=row_i, column=2, sticky="we", pady=4)
+            for ev in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                sc.bind(ev, lambda e, k=key: self._wheel_gain(k, e))
+            plus = tk.Button(grid, text="+", width=2, command=lambda k=key: self._nudge_gain(k, 0.5),
+                             repeatdelay=400, repeatinterval=80, bg="#33404D", fg=TEXT, relief="flat",
+                             activebackground="#40505F", activeforeground=TEXT, padx=0, pady=0)
+            plus.grid(row=row_i, column=3, padx=(2, 0))
+            e = tk.Entry(grid, width=6, bg=FIELD_BG, fg=TEXT, insertbackground=TEXT,
+                         relief="flat", justify="right")
+            e.grid(row=row_i, column=4, padx=(6, 0))
+            tk.Label(grid, text="%", bg=PANEL_BG, fg=MUTED).grid(row=row_i, column=5, sticky="w")
             e.bind("<Return>", lambda _e: self._apply_gain())
+            self.gain_entries[key], self.gain_scales[key], self.gain_vars[key] = e, sc, var
         row = tk.Frame(f, bg=PANEL_BG)
         row.pack(fill="x", padx=6, pady=(4, 2))
         self._btn(row, "Exact (100/100)", self._reset_gain).pack(side="left")
         self._btn(row, "Random hidden", self._random_gain).pack(side="left", padx=4)
         self._btn(row, "Reveal", self._reveal_gain).pack(side="left")
+        # code speed -> the speeds that would drive straight with these motors
+        row = tk.Frame(f, bg=PANEL_BG)
+        row.pack(fill="x", padx=6, pady=(2, 0))
+        tk.Label(row, text="Speed in your code", bg=PANEL_BG, fg=MUTED).pack(side="left")
+        self.base_speed = tk.StringVar(value="30")
+        sp = tk.Spinbox(row, from_=1, to=100, increment=5, width=4, textvariable=self.base_speed,
+                        command=self._show_gain_msg, bg=FIELD_BG, fg=TEXT, insertbackground=TEXT,
+                        buttonbackground="#33404D", relief="flat", justify="right")
+        sp.pack(side="left", padx=4)
+        sp.bind("<KeyRelease>", lambda _e: self._show_gain_msg())
+        self.copy_btn = self._btn(row, "Copy", self._copy_suggestion)
+        self.copy_btn.pack(side="right")
+        self._suggestion = ""
         self.gain_msg = tk.Label(f, text="", bg=PANEL_BG, fg=MUTED, anchor="w", justify="left",
-                                 wraplength=PANEL_W - 40)
-        self.gain_msg.pack(fill="x", padx=6, pady=(2, 6))
+                                 font=("Consolas", 10, "bold"), wraplength=PANEL_W - 30)
+        self.gain_msg.pack(fill="x", padx=6, pady=(2, 2))
 
-        tk.Frame(f, bg="#3A424D", height=1).pack(fill="x", padx=6, pady=4)
+        row = tk.Frame(f, bg=PANEL_BG)
+        row.pack(fill="x", padx=6)
+        self.realistic = tk.BooleanVar(value=self._saved_realism[0])
+        tk.Checkbutton(row, text="Realistic   dead zone",
+                       variable=self.realistic, command=self._publish_realism, bg=PANEL_BG,
+                       fg=TEXT, selectcolor=FIELD_BG, activebackground=PANEL_BG,
+                       activeforeground=TEXT).pack(side="left")
+        self.dead_zone = tk.StringVar(value=str(self._saved_realism[1]))
+        sp = tk.Spinbox(row, from_=0, to=40, width=3, textvariable=self.dead_zone,
+                        command=self._publish_realism, bg=FIELD_BG, fg=TEXT, insertbackground=TEXT,
+                        buttonbackground="#33404D", relief="flat", justify="right")
+        sp.pack(side="left", padx=2)
+        sp.bind("<KeyRelease>", lambda _e: self._publish_realism())
+
+        tk.Frame(f, bg="#3A424D", height=1).pack(fill="x", padx=6, pady=3)
         row = tk.Frame(f, bg=PANEL_BG)
         row.pack(fill="x", padx=6)
         self.show_trail = tk.BooleanVar(value=True)
@@ -1192,27 +1728,153 @@ class SimWindow:
                        command=lambda: self._draw_trail(full=True), bg=PANEL_BG, fg=TEXT,
                        selectcolor=FIELD_BG, activebackground=PANEL_BG,
                        activeforeground=TEXT).pack(side="left")
-        self._btn(row, "Clear trail / restart measure", self._clear_trail).pack(side="left", padx=6)
-        self.drift_label = tk.Label(f, text="", bg=PANEL_BG, fg=TEXT, font=("Consolas", 10),
-                                    anchor="w", justify="left")
-        self.drift_label.pack(fill="x", padx=6, pady=(6, 2))
+        self._btn(row, "Clear trail", self._clear_trail).pack(side="left", padx=6)
+        self.drift_label = tk.Label(f, text="", bg=PANEL_BG, fg=TEXT, font=("Consolas", 9),
+                                    anchor="w", justify="left", wraplength=PANEL_W - 30)
+        self.drift_label.pack(fill="x", padx=6, pady=(4, 2))
         self._show_gain()
 
     def _show_gain(self):
+        self._gain_updating = True
+        try:
+            for i, k in enumerate(("l", "r")):
+                if self.gain_hidden:
+                    self.gain_vars[k].set(100.0)
+                    self.gain_scales[k].configure(state="disabled")
+                else:
+                    self.gain_scales[k].configure(state="normal")
+                    self.gain_vars[k].set(min(SLIDER_MAX, max(SLIDER_MIN, self.motor_gain[i] * 100)))
+        finally:
+            self._gain_updating = False
         if self.gain_hidden:
             for e in self.gain_entries.values():
                 self._set_entry(e, "?")
-            self.gain_msg.configure(text="A hidden mismatch is active. Make the robot drive "
-                                         "straight by changing the speeds in your code.", fg=ACCENT)
         else:
             self._set_entry(self.gain_entries["l"], f"{self.motor_gain[0] * 100:g}")
             self._set_entry(self.gain_entries["r"], f"{self.motor_gain[1] * 100:g}")
-            if self.motor_gain == [1.0, 1.0]:
-                self.gain_msg.configure(text="Motors are exact (no mismatch).", fg=MUTED)
-            else:
-                self.gain_msg.configure(
-                    text=f"Code speed 25 gives left {25 * self.motor_gain[0]:.1f}, "
-                         f"right {25 * self.motor_gain[1]:.1f}", fg=OK)
+        self._show_gain_msg()
+
+    def _on_gain_slider(self, key):
+        """Slider moved: change that wheel's strength immediately, keep the trail so the
+        change in path can be seen, and restart the straightness measurement."""
+        if self._gain_updating or self.gain_hidden:
+            return
+        v = round(float(self.gain_vars[key].get()), 1)
+        i = 0 if key == "l" else 1
+        if abs(self.motor_gain[i] * 100 - v) < 0.051:      # unchanged (or just redisplayed)
+            return
+        cur = self.motor_gain[i] * 100
+        if (cur < SLIDER_MIN and v == SLIDER_MIN) or (cur > SLIDER_MAX and v == SLIDER_MAX):
+            return                                         # typed value beyond the slider's range
+        self._set_gain_value(i, key, v)
+
+    def _set_gain_value(self, i, key, v):
+        v = round(min(200.0, max(0.0, v)), 1)
+        self.motor_gain[i] = v / 100.0
+        self._publish_gain()
+        self._set_entry(self.gain_entries[key], f"{v:g}")
+        self._show_gain_msg()
+        self._run_start = None
+        self._schedule_save()
+
+    @staticmethod
+    def _drift_cm_per_m(rel):
+        """Sideways drift (cm) after driving 1 m with a relative wheel-speed error ``rel``."""
+        return abs(rel) * 100.0 ** 2 / (2.0 * R.WHEEL_TRACK_CM)
+
+    def _pair_error(self, left, right):
+        """Relative speed difference (left - right) of the real wheels for motors(left, right)."""
+        vl, vr = left * self.motor_gain[0], right * self.motor_gain[1]
+        return 0.0 if vl + vr == 0 else (vl - vr) / ((vl + vr) / 2.0)
+
+    def _describe_pair(self, left, right):
+        rel = self._pair_error(left, right)
+        d = self._drift_cm_per_m(rel)
+        if d < 0.5:
+            return f"motors({left}, {right})  straight"
+        side = "left" if rel < 0 else "right"           # weaker left wheel -> turns left
+        amount = f"~{d:.0f} cm" if d < 60 else "a lot"
+        return f"motors({left}, {right})  drifts {amount} {side} per metre"
+
+    def _straight_pairs(self, base):
+        """Whole-number motors(left, right) that drive (nearly) straight, best first."""
+        gl, gr = self.motor_gain
+        if gl <= 0 or gr <= 0:
+            return []
+        if abs(gl - gr) < 1e-9:
+            return [(base, base)]
+        if gl > gr:                                   # right is weaker: raise right or lower left
+            pairs = [(base, round(base * gl / gr)), (round(base * gr / gl), base)]
+        else:
+            pairs = [(round(base * gr / gl), base), (base, round(base * gl / gr))]
+        pairs = [p for p in pairs if 1 <= p[0] <= 100 and 1 <= p[1] <= 100]
+        return sorted(pairs, key=lambda p: abs(self._pair_error(*p)))
+
+    def _straight_speeds(self, base):
+        """Short text for the Motors tab: the speeds to put in the code."""
+        pairs = self._straight_pairs(base)
+        if not pairs:
+            return "A wheel at 0 % cannot be corrected.", ""
+        if self.motor_gain[0] == self.motor_gain[1]:
+            return f"Use motors({base}, {base})  - no change needed", f"motors({base}, {base})"
+        text = "Use " + "   or ".join(f"motors({l}, {r})" for l, r in pairs)
+        return text, f"motors({pairs[0][0]}, {pairs[0][1]})"
+
+    def _nudge_gain(self, key, step):
+        """- / + buttons: change one wheel by a small step."""
+        if self.gain_hidden:
+            return
+        i = 0 if key == "l" else 1
+        v = self.motor_gain[i] * 100 + step
+        self._gain_updating = True
+        try:
+            self.gain_vars[key].set(min(SLIDER_MAX, max(SLIDER_MIN, v)))
+        finally:
+            self._gain_updating = False
+        self._set_gain_value(i, key, v)
+
+    def _wheel_gain(self, key, e):
+        up = getattr(e, "delta", 0) > 0 or getattr(e, "num", 0) == 4
+        step = 0.1 if (e.state & 0x0001) else 0.5
+        self._nudge_gain(key, step if up else -step)
+        return "break"
+
+    def _show_gain_msg(self):
+        if not hasattr(self, "copy_btn"):
+            return
+        if self.gain_hidden:
+            self._suggestion = ""
+            self.copy_btn.configure(state="disabled")
+            self.gain_msg.configure(text="Hidden mismatch: find the speeds yourself.", fg=ACCENT)
+            return
+        try:
+            base = int(float(self.base_speed.get()))
+        except ValueError:
+            base = 0
+        if not 1 <= base <= 100:
+            self._suggestion = ""
+            self.copy_btn.configure(state="disabled")
+            self.gain_msg.configure(text="Code speed: a whole number 1-100", fg=ERR)
+            return
+        text, self._suggestion = self._straight_speeds(base)
+        self.copy_btn.configure(state="normal" if self._suggestion else "disabled")
+        self.gain_msg.configure(text=text, fg=MUTED if self.motor_gain == [1.0, 1.0] else OK)
+
+    def _copy_suggestion(self):
+        if self._suggestion:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self._suggestion)
+            self.coord_label.configure(text=f"Copied {self._suggestion}")
+
+    def _publish_realism(self):
+        try:
+            dz = max(0, min(40, int(float(self.dead_zone.get()))))
+        except ValueError:
+            dz = R.DEFAULT_DEAD_ZONE
+        self.sh.set("dead_zone", dz)
+        self.sh.set("realism", 1 if self.realistic.get() else 0)
+        self._saved_realism = (bool(self.realistic.get()), dz)
+        self._schedule_save()
 
     def _publish_gain(self):
         self.sh.set("motor_gain", self.motor_gain)
@@ -1230,7 +1892,10 @@ class SimWindow:
             return
         self.motor_gain = [l / 100.0, r / 100.0]
         self.gain_hidden = False
-        self._gain_changed()
+        self._publish_gain()
+        self._show_gain()
+        self._run_start = None
+        self._schedule_save()
         self.root.focus_set()
 
     def _reset_gain(self):
@@ -1267,7 +1932,13 @@ class SimWindow:
         d = self.world.to_layout()
         d["simulator"] = {"motor_strength_percent": [round(self.motor_gain[0] * 100, 2),
                                                      round(self.motor_gain[1] * 100, 2)],
-                          "mismatch_hidden": self.gain_hidden}
+                          "mismatch_hidden": self.gain_hidden,
+                          "realistic": self._saved_realism[0],
+                          "dead_zone": self._saved_realism[1]}
+        if hasattr(self, "race"):
+            d["simulator"]["race"] = self.race.settings()
+        if hasattr(self, "mounted"):
+            d["simulator"]["mounted"] = bool(self.mounted.get())
         return d
 
     def _apply_sim_settings(self, sim):
@@ -1276,8 +1947,16 @@ class SimWindow:
             if 0 <= l <= 200 and 0 <= r <= 200:
                 self.motor_gain = [l / 100.0, r / 100.0]
             self.gain_hidden = bool(sim.get("mismatch_hidden", False))
+            self._saved_realism = (bool(sim.get("realistic", False)),
+                                   int(sim.get("dead_zone", R.DEFAULT_DEAD_ZONE)))
+            self._saved_race = sim.get("race")
+            self._saved_mounted = bool(sim.get("mounted", True))
         except (TypeError, ValueError):
             return
+        if hasattr(self, "realistic"):
+            self.realistic.set(self._saved_realism[0])
+            self.dead_zone.set(str(self._saved_realism[1]))
+            self._publish_realism()
         if hasattr(self, "gain_entries"):
             self._publish_gain()
             self._show_gain()
@@ -1375,44 +2054,36 @@ class SimWindow:
         turn = _wrap(-(pose[2] - st[2]))                  # user frame: + = turned left
         drift = "left" if side < 0 else "right"
         self.drift_label.configure(text=(
-            f"Since start of run:\n"
-            f"  forward  {fwd:6.1f} cm\n"
-            f"  sideways {abs(side):6.1f} cm to the {drift}\n"
-            f"  turned   {turn:+6.1f}\u00b0  (+ = left)\n\n" + self._correction_hint()))
+            f"This run: {fwd:.0f} cm forward, drifted {abs(side):.1f} cm {drift}\n"
+            + self._correction_hint()))
 
     def _correction_hint(self):
         """Suggest wheel speeds that would drive straight, worked out only from the
         measured run (distance and turn), as you would do with a real robot."""
         cmds = getattr(self, "_run_cmds", set())
         if not cmds:
-            return "Correction: drive with one constant speed\n(e.g. motors(25, 25)) to get a hint."
+            return "Drive at one constant speed for a correction."
         if len(cmds) > 1:
-            return "Correction: the speeds changed during the run.\nFor a hint, drive with one constant speed."
+            return "Speeds changed during the run - drive at one\nconstant speed for a correction."
         lc, rc = next(iter(cmds))
         if lc == 0 or rc == 0 or (lc > 0) != (rc > 0):
-            return "Correction: both wheels must drive the same\nway (e.g. motors(25, 25))."
+            return "Drive both wheels forward for a correction."
         s = self._run_dist
         if abs(s) < 10:
-            return "Correction: drive at least 10 cm for a hint."
+            return "Drive at least 10 cm for a correction."
         theta = math.radians(self._run_turn)                 # + = turned right on screen
         sl = s + theta * R.WHEEL_TRACK_CM / 2.0               # distance each wheel travelled
         sr = s - theta * R.WHEEL_TRACK_CM / 2.0
         if sl * sr <= 0:
-            return "Correction: the robot spun too much to estimate."
+            return "The robot spun too much to work out a correction."
         if abs(self._run_turn) < 0.5:
-            return f"Correction: none needed - motors({lc}, {rc})\ndrives straight."
-        # wheel speed = command x strength, so strength ratio = (sl/lc) / (sr/rc)
-        new_r = sl * rc / sr          # right command that matches the left wheel
-        new_l = sr * lc / sl          # or: left command that matches the right wheel
-        options = []
-        if abs(new_r) <= 100:
-            options.append(f"motors({lc}, {int(round(new_r))})   right {rc} -> {new_r:.1f}")
-        if abs(new_l) <= 100:
-            options.append(f"motors({int(round(new_l))}, {rc})   left {lc} -> {new_l:.1f}")
-        weak = "right" if abs(sl) > abs(sr) else "left"
-        ratio = min(abs(sl), abs(sr)) / max(abs(sl), abs(sr)) * 100
-        return (f"Correction: {weak} wheel is ~{ratio:.0f} % of the other.\n"
-                f"To go straight try:\n  " + "\n  ".join(options))
+            return f"Straight - keep motors({lc}, {rc})"
+        # wheel speed = command x strength, so the measured wheel distances give the fix
+        pairs = [(lc, round(sl * rc / sr)), (round(sr * lc / sl), rc)]
+        pairs = [p for p in pairs if 1 <= abs(p[0]) <= 100 and 1 <= abs(p[1]) <= 100]
+        if not pairs:
+            return "Too big a difference to correct at this speed."
+        return "Measured fix: " + "   or ".join(f"motors({l}, {r})" for l, r in pairs)
 
     # =====================================================================================
     # Sensors tab: accelerometer (tilt pad), microphone, speaker, temperature, light
@@ -1424,8 +2095,13 @@ class SimWindow:
         self.tilt = [0.0, 0.0]          # roll (right edge down +), pitch (logo edge down +), deg
         self.face_down = False
 
-        tk.Label(f, text="Tilt the micro:bit: drag the dot (it rolls downhill)",
-                 bg=PANEL_BG, fg=MUTED, anchor="w").pack(fill="x", padx=6, pady=(6, 2))
+        self.mounted = tk.BooleanVar(value=self._saved_mounted)
+        tk.Checkbutton(f, text="micro:bit upright on the Cutebot (as on the robot)",
+                       variable=self.mounted, command=self._mount_changed, bg=PANEL_BG, fg=TEXT,
+                       selectcolor=FIELD_BG, activebackground=PANEL_BG,
+                       activeforeground=TEXT, anchor="w").pack(fill="x", padx=4, pady=(4, 0))
+        self.pad_hint = tk.Label(f, text="", bg=PANEL_BG, fg=MUTED, anchor="w", justify="left")
+        self.pad_hint.pack(fill="x", padx=6, pady=(0, 2))
         row = tk.Frame(f, bg=PANEL_BG)
         row.pack(fill="x", padx=6)
         P = self.PAD
@@ -1435,7 +2111,7 @@ class SimWindow:
         pad.create_rectangle(8, 8, P - 8, P - 8, outline="#3A424D")
         pad.create_line(P / 2, 8, P / 2, P - 8, fill="#2A3038")
         pad.create_line(8, P / 2, P - 8, P / 2, fill="#2A3038")
-        pad.create_text(P / 2, 15, text="logo", fill=MUTED, font=("Segoe UI", 7))
+        self.pad_top = pad.create_text(P / 2, 15, text="front", fill=MUTED, font=("Segoe UI", 7))
         self.pad_dot = pad.create_oval(0, 0, 0, 0, fill="#1F6FEB", outline="#9CDCFE")
         for ev in ("<ButtonPress-1>", "<B1-Motion>"):
             pad.bind(ev, self._on_pad)
@@ -1443,12 +2119,15 @@ class SimWindow:
 
         btns = tk.Frame(row, bg=PANEL_BG)
         btns.pack(side="left", fill="y", padx=(8, 0))
+        self.tilt_btns = {}
         for text, cmd in (("Flat", lambda: self._set_tilt(0, 0, False)),
                           ("Face down", lambda: self._set_tilt(0, 0, True)),
                           ("Logo up", lambda: self._set_tilt(0, -90, False)),
                           ("Shake", lambda: self._pulse("shake")),
                           ("Freefall", lambda: self._pulse("freefall"))):
-            self._btn(btns, text, cmd).pack(fill="x", pady=1)
+            b = self._btn(btns, text, cmd)
+            b.pack(fill="x", pady=1)
+            self.tilt_btns[text] = b
         self.accel_label = tk.Label(f, text="", bg=PANEL_BG, fg=TEXT, font=("Consolas", 9),
                                     anchor="w", justify="left")
         self.accel_label.pack(fill="x", padx=6, pady=(2, 4))
@@ -1486,7 +2165,7 @@ class SimWindow:
                      highlightthickness=0, bd=0,
                      command=lambda v: self._publish_sensors()).pack(side="left", padx=(2, 6))
         self._mic_clap_until = 0.0
-        self._draw_pad()
+        self._mount_changed()
 
     def _on_pad(self, e):
         P = self.PAD
@@ -1494,6 +2173,28 @@ class SimWindow:
         dx = max(-1.0, min(1.0, (e.x - P / 2) / r))
         dy = max(-1.0, min(1.0, (e.y - P / 2) / r))
         self._set_tilt(dx * 90.0, -dy * 90.0, False)
+
+    def _mount_changed(self):
+        mounted = self.mounted.get()
+        self.pad.itemconfigure(self.pad_top, text="front" if mounted else "logo")
+        self.pad_hint.configure(text=("Tilt the robot (a slope): drag the dot. Speeding up,\n"
+                                      "braking and bumps show in z and x.") if mounted else
+                                "Tilt the micro:bit: drag the dot (it rolls downhill)")
+        self.tilt_btns["Flat"].configure(text="Level" if mounted else "Flat")
+        for name in ("Face down", "Logo up"):
+            self.tilt_btns[name].configure(state="disabled" if mounted else "normal")
+        if mounted:
+            self.face_down = False
+        self._draw_pad()
+        self._publish_sensors()
+        if self._save_job is not None or hasattr(self, "race"):
+            self._schedule_save()
+
+    def _gravity(self):
+        if self.mounted.get():
+            from .robot import DISPLAY_FACES_FORWARD
+            return sensors.accel_mounted(self.tilt[0], self.tilt[1], DISPLAY_FACES_FORWARD)
+        return sensors.accel_from_tilt(self.tilt[0], self.tilt[1], self.face_down)
 
     def _set_tilt(self, roll, pitch, face_down):
         self.tilt = [roll, pitch]
@@ -1509,10 +2210,20 @@ class SimWindow:
         d = 7
         self.pad.coords(self.pad_dot, cx - d, cy - d, cx + d, cy + d)
         self.pad.itemconfigure(self.pad_dot, fill="#8B4A4A" if self.face_down else "#1F6FEB")
-        x, y, z = sensors.accel_from_tilt(self.tilt[0], self.tilt[1], self.face_down)
+        x, y, z = self._gravity()
         g = sensors.gesture_from_accel(x, y, z) or "-"
         self.accel_label.configure(text=f"x {x:+6.0f}  y {y:+6.0f}  z {z:+6.0f} mg\n"
                                         f"gesture: {g}" + ("   (face down)" if self.face_down else ""))
+
+    def _update_accel_label(self, published):
+        """Show the live reading (with the robot's motion) while a program runs."""
+        if not published or not hasattr(self, "accel_label"):
+            return
+        x, y, z = self.sh.get("accel_now")
+        g = sensors.gesture_from_accel(x, y, z) or "-"
+        text = f"x {x:+6.0f}  y {y:+6.0f}  z {z:+6.0f} mg\ngesture: {g}"
+        if self.accel_label.cget("text") != text:
+            self.accel_label.configure(text=text)
 
     def _pulse(self, name):
         self.sh.set("pulse_name", name)
@@ -1528,7 +2239,8 @@ class SimWindow:
 
     def _publish_sensors(self):
         sh = self.sh
-        sh.set("accel", sensors.accel_from_tilt(self.tilt[0], self.tilt[1], self.face_down))
+        sh.set("accel", self._gravity())
+        sh.set("mounted", 1 if self.mounted.get() else 0)
         level = 255 if time.time() < self._mic_clap_until else int(self.mic_var.get())
         sh.set("mic_level", level)
         sh.set("temp_c", float(self.temp_var.get()))
@@ -1548,6 +2260,108 @@ class SimWindow:
     # =====================================================================================
     # micro:bit reference (Help window)
     # =====================================================================================
+    # --- pause, step, slow motion -------------------------------------------------------------
+    def _sim_controls_locked(self):
+        r = getattr(self, "race", None)
+        return r is not None and r.race_id is not None      # not during a teacher's race
+
+    def _publish_sim_controls(self):
+        if self._sim_controls_locked():
+            self.speed_var.set(1.0)
+            self.paused = False
+        self.sh.set("sim_speed", float(self.speed_var.get()))
+        self.sh.set("paused", 1 if self.paused else 0)
+        self.sh.set("pause_on", sum(bit for bit, v in self.pause_on_vars if v.get()))
+        self.pause_btn.configure(text="Resume (Space)" if self.paused else "Pause (Space)",
+                                 bg="#9E6A03" if self.paused else "#2D333B")
+        on = [n for (bit, v), n in zip(self.pause_on_vars, ("motors", "line", "bump")) if v.get()]
+        self.pause_on_btn.configure(text=("Pause on: " + ", ".join(on) + " \u25be") if on
+                                    else "Pause on \u25be", bg="#1F6FEB" if on else "#2D333B")
+
+    def _sim_ui_changed(self):
+        self._publish_sim_controls()
+        self.root.focus_set()                  # so Space / N keep working
+
+    def toggle_pause(self):
+        if self._sim_controls_locked():
+            self.coord_label.configure(text="No pausing during a race")
+            return
+        self.paused = not self.paused
+        if not self.paused:
+            self.pause_reason = ""
+        self._sim_ui_changed()
+
+    def step(self):
+        """Run the program to its next line, then pause again."""
+        if self._sim_controls_locked():
+            return
+        if not self.paused:
+            self.paused = True
+            self.pause_reason = ""
+            self._publish_sim_controls()
+            return
+        self.sh.bump("step_seq")
+
+    def _sim_frame(self):
+        rs = (self.sh.get("owner_gen"), self.sh.get("run_seq"))
+        if rs != getattr(self, "_pause_run", None):
+            self._pause_run = rs
+            self.pause_reason = ""                 # a new run: the old reason no longer applies
+        seq = self.sh.get("auto_pause_seq")
+        if seq != self._auto_seen:
+            self._auto_seen = seq
+            if seq and not self.paused and not self._sim_controls_locked():
+                self.paused = True                     # the program paused itself
+                self.pause_reason = self.sh.get("auto_pause_why")
+                self._publish_sim_controls()
+                self.open_code()
+
+    # --- extra windows ---------------------------------------------------------------------
+    def open_code(self):
+        if self._code_win is not None and self._code_win.alive():
+            self._code_win.lift()
+        else:
+            self._code_win = panels.CodeWindow(self.root, self)
+
+    def open_graphs(self):
+        if self._graph_win is not None and self._graph_win.alive():
+            self._graph_win.lift()
+        else:
+            self._graph_win = panels.GraphWindow(self.root)
+
+    def open_radio(self):
+        if self._radio_win is not None and self._radio_win.alive():
+            self._radio_win.lift()
+        else:
+            self._radio_win = panels.RadioWindow(self.root, self.radio_to_robot)
+            for text, colour in self.radio_log[-200:]:
+                self._radio_win.add(text, colour)
+
+    # --- radio -----------------------------------------------------------------------------
+    def radio_to_robot(self, data, group, channel):
+        """A message for the program (from the console or another robot)."""
+        self.sh.ring_put("rx_msgs", "rx_wr", data, group, channel)
+
+    def _radio_note(self, text, colour):
+        self.radio_log.append((text, colour))
+        del self.radio_log[:-300]
+        if self._radio_win is not None and self._radio_win.alive():
+            self._radio_win.add(text, colour)
+
+    def _radio_frame(self, has_prog):
+        """Collect what the program sent; pass it on to the other robots (LAN)."""
+        if not has_prog:
+            self._tx_pos = self.sh.get("tx_wr")
+            return
+        self._tx_pos, msgs = self.sh.ring_get("tx_msgs", "tx_wr", self._tx_pos)
+        for data, group, channel in msgs:
+            self._radio_note(f"from robot g{group:<3} ch{channel:<2}  {panels.describe(data)}", panels.OK)
+            self.radio_sent(data, group, channel)
+
+    def radio_sent(self, data, group, channel):
+        """The program sent a radio message: pass it on to the LAN (shared arena)."""
+        self.race.radio_out(data, group, channel)
+
     def open_help(self, query=""):
         if self._help is not None and self._help.top.winfo_exists():
             self._help.top.deiconify()
@@ -1619,8 +2433,14 @@ class SimWindow:
         state = sh.get("prog_state")
         if not has_prog:
             text, colour = "Waiting for a program...\nRun a .py file that imports microbit.", MUTED
+        elif state == shared.STATE_RUNNING and self.paused:
+            why = f" - {self.pause_reason}" if self.pause_reason else ""
+            text, colour = (f"PAUSED at line {sh.get('cur_line')}{why}\n"
+                            "Space = resume, N = step one line"), "#D29922"
         elif state == shared.STATE_RUNNING and live:
-            text, colour = f"Running  {name}", OK
+            speed = self.speed_var.get()
+            text = f"Running  {name}" + (f"   (speed {speed:g}x)" if speed != 1 else "")
+            colour = OK
         elif state == shared.STATE_RUNNING:
             text, colour = (f"Paused or stopped  {name}\n(breakpoint in the debugger, "
                             "or Stop was pressed)"), "#D29922"
@@ -1635,14 +2455,31 @@ class SimWindow:
         self.message.configure(text=sh.get("message") if state == shared.STATE_ERROR else "")
 
         self._update_trail(has_prog, live, pose, motors)
+        self._radio_frame(has_prog)
+        self._sim_frame()
+        self.race.frame(now, pose, has_prog, live, state, wheel_v)
+        for win in (self._code_win, self._graph_win, self._radio_win):
+            if win is not None and win.alive():
+                if win is self._code_win:
+                    win.update(sh, has_prog, live)
+                elif win is self._graph_win:
+                    win.update(sh, live)
+                else:
+                    win.update(sh, has_prog)
         pct = 100.0 / R.CM_PER_S_AT_100
         wheels = f"Wheels     L {wheel_v[0] * pct:+5.1f} %   R {wheel_v[1] * pct:+5.1f} %   (real)\n"
         if self.gain_hidden:
             wheels = "Wheels     hidden mismatch (Motors tab)\n"
         self._update_speaker(published)
+        self._update_accel_label(live)
         x, y = self.to_user(pose[0], pose[1])
         a = _wrap(-pose[2])
-        sonar = f"{sh.get('sonar_cm'):5.1f} cm" if sh.get("sonar_active") and published else "  (not used)"
+        if sh.get("sonar_active") and published:
+            d = sh.get("sonar_cm")
+            sonar = (" < 2 cm: no reading" if d < R.SONAR_MIN_CM else
+                     " nothing in range" if d >= R.SONAR_MAX_CM else f"{d:5.1f} cm")
+        else:
+            sonar = "  (not used)"
         self.readout.configure(text=(
             f"Motors     L {motors[0]:+5.0f} %   R {motors[1]:+5.0f} %   (code)\n"
             f"{wheels}"

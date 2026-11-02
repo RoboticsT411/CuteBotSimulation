@@ -10,14 +10,22 @@ They talk through one small block of shared memory with fixed fields.  Each
 field has a single writer, so no locking is needed.
 """
 
+import os
 import struct
 import sys
 from multiprocessing import shared_memory
 
-SHM_NAME = "lsbu_cutebot_sim_v5"
+# CUTEBOT_SIM_INSTANCE=name runs a separate simulator (window + program) on the same PC,
+# e.g. to try a LAN competition with two robots on one computer.
+SHM_NAME = None          # set below from the layout, so every version gets its own block
 MAX_OBSTACLES = 40
 MAX_LINE_FLOATS = 24000   # x, y pairs; (NaN, NaN) separates strokes
 MAGIC = 0xC07EB070
+MAX_OTHERS = 24           # other robots in a shared arena (LAN)
+RADIO_SLOTS = 16          # radio messages buffered each way
+RADIO_SLOT = 256          # bytes per message slot: len, group, channel, 0, payload (<= 251)
+RADIO_MAX = 251
+CMD_LOG = 32              # motor commands kept for the code view
 
 # (name, struct code, count).  Writer in the comment: G = window, P = program.
 _FIELDS = [
@@ -49,6 +57,18 @@ _FIELDS = [
     ("obs", "f", 4 * 40),       # G  obstacles: x0, y0, x1, y1 (cm, internal frame)
     ("wline_n", "I", 1),        # G  number of floats used in "wline"
     ("wline", "f", 24000),      # G  world line strokes as x, y pairs, NaN pair between strokes
+    ("realism", "B", 1),        # G  1 = realistic sensors and motors (noise, dead zone)
+    ("dead_zone", "B", 1),      # G  motor speeds below this do not turn the wheel (realistic)
+    ("hold", "B", 1),           # G  1 = a race is armed: programs wait for the teacher's GO
+    ("others_n", "H", 1),       # G  other robots in a shared arena
+    ("others", "f", 3 * 24),    # G  their x, y, heading (internal frame)
+    ("rx_wr", "I", 1),          # G  radio messages written for the program (total)
+    ("rx_msgs", "B", 16 * 256), # G  ring of RADIO_SLOTS slots
+    ("sim_speed", "f", 1),      # G  simulation speed (1 = real time, 0.25 = slow motion)
+    ("paused", "B", 1),         # G  1 = simulation paused
+    ("step_seq", "I", 1),       # G  bumped by Step: run to the next line of the program
+    ("pause_on", "B", 1),       # G  auto-pause: 1 = motor command, 2 = line sensor change, 4 = bump
+    ("mounted", "B", 1),        # G  1 = micro:bit stands upright on the Cutebot (accel follows the robot)
     ("owner_gen", "I", 1),      # P  bumped by each new program run
     ("owner_pid", "I", 1),      # P
     ("prog_tick", "I", 1),      # P  increments while the program's physics runs
@@ -67,6 +87,23 @@ _FIELDS = [
     ("display", "B", 25),       # P  LED brightness 0..9, row by row
     ("lights", "B", 6),         # P  headlights: left RGB, right RGB
     ("neopixels", "B", 6),      # P  bottom NeoPixels: left RGB, right RGB
+    ("held", "B", 1),           # P  1 while the program waits for GO
+    ("line_hold", "B", 1),      # P  1 while the program is stopped at a line (paused)
+    ("auto_pause_seq", "I", 1), # P  bumped when the program paused itself (pause_on)
+    ("auto_pause_why", "40s", 1),  # P  why: "motor command", "line sensor", "bump"
+    ("run_time", "f", 1),       # P  simulated seconds since the program (re)started
+    ("accel_now", "f", 3),      # P  accelerometer as the program sees it (mg), for the window
+    ("bumps", "I", 1),          # P  collisions so far (each new contact counts once)
+    ("trace_on", "B", 1),       # P  1 = cur_line is being updated (off while debugging)
+    ("cur_line", "I", 1),       # P  line of the student's file being run (0 = none)
+    ("prog_path", "260s", 1),   # P  full path of the student's file
+    ("cmd_n", "I", 1),          # P  motor commands written so far
+    ("cmd_log", "f", 5 * 32),   # P  ring of (time s, left, right, line, main line)
+    ("radio_on", "B", 1),       # P
+    ("radio_group", "B", 1),    # P
+    ("radio_channel", "B", 1),  # P
+    ("tx_wr", "I", 1),          # P  radio messages sent by the program (total)
+    ("tx_msgs", "B", 16 * 256), # P  ring of RADIO_SLOTS slots
 ]
 
 STATE_NONE, STATE_RUNNING, STATE_FINISHED, STATE_ERROR = 0, 1, 2, 3
@@ -78,6 +115,14 @@ for _name, _code, _count in _FIELDS:
     _LAYOUT[_name] = (_off, _fmt, _count)
     _off += struct.calcsize(_fmt)
 SIZE = _off
+
+# The name includes a fingerprint of the field layout: a window and a program from different
+# versions of the simulator never share a block (they would read each other's fields wrongly).
+import zlib as _zlib  # noqa: E402
+
+_FINGERPRINT = _zlib.crc32(repr(_FIELDS).encode()) & 0xFFFF
+SHM_NAME = (f"lsbu_cutebot_sim_{_FINGERPRINT:04x}"
+            + os.environ.get("CUTEBOT_SIM_INSTANCE", "")[:12])
 
 
 class Shared:
@@ -157,6 +202,35 @@ class Shared:
         code = fmt[-1]
         n = max(0, min(n, count))
         return list(struct.unpack_from(f"<{n}{code}", self.buf, off))
+
+    def raw(self, name):
+        """(offset, size) of a field, for direct access to ``self.buf``."""
+        off, fmt, _ = _LAYOUT[name]
+        return off, struct.calcsize(fmt)
+
+    # --- radio message rings (one writer, one reader each) ---------------------------
+    def ring_put(self, ring, counter, data, group, channel):
+        off, _ = self.raw(ring)
+        n = self.get(counter)
+        slot = off + (n % RADIO_SLOTS) * RADIO_SLOT
+        data = bytes(data)[:RADIO_MAX]
+        self.buf[slot:slot + 4] = bytes((len(data), group & 0xFF, channel & 0xFF, 0))
+        self.buf[slot + 4:slot + 4 + len(data)] = data
+        self.set(counter, (n + 1) & 0xFFFFFFFF)
+
+    def ring_get(self, ring, counter, read_pos):
+        """Messages after ``read_pos``: returns (new_read_pos, [(data, group, channel), ...])."""
+        off, _ = self.raw(ring)
+        wr = self.get(counter)
+        if (wr - read_pos) & 0xFFFFFFFF > RADIO_SLOTS:
+            read_pos = (wr - RADIO_SLOTS) & 0xFFFFFFFF        # lost the oldest ones
+        out = []
+        while read_pos != wr:
+            slot = off + (read_pos % RADIO_SLOTS) * RADIO_SLOT
+            n, group, channel = self.buf[slot], self.buf[slot + 1], self.buf[slot + 2]
+            out.append((bytes(self.buf[slot + 4:slot + 4 + n]), group, channel))
+            read_pos = (read_pos + 1) & 0xFFFFFFFF
+        return read_pos, out
 
     def bump(self, name):
         self.set(name, (self.get(name) + 1) & 0xFFFFFFFF)
