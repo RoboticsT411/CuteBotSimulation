@@ -8,7 +8,7 @@ Made for the [LSBU MicroPython labs](https://github.com/LSBU-Electronics-Lab/Mic
 (T411 Robotics Laboratory, London South Bank University). All complete programs from
 Labs 1–9 run unmodified; Lab 10 has a ready-made maze.
 
-![Cutebot simulator window](docs/window.png)
+![Cutebot simulator window](Docs/window.png)
 
 ## Features
 
@@ -369,7 +369,7 @@ own built-in `microbit` module, so the simulator files are not used there. To up
 ([`MicrobitUploader.py`](https://github.com/mjtroniks/Microbit/blob/main/MicrobitUploader.py)):
 it flashes your file with `uflash` and shows the robot's `print()` output over USB.
 
-![micro:bit Flasher + REPL](docs/uploader.png)
+![micro:bit Flasher + REPL](Docs/uploader.png)
 
 *Example screen (values shown for illustration).*
 
