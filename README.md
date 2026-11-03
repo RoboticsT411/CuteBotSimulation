@@ -8,7 +8,7 @@ Made for the [LSBU MicroPython labs](https://github.com/LSBU-Electronics-Lab/Mic
 (T411 Robotics Laboratory, London South Bank University). All complete programs from
 Labs 1–9 run unmodified; Lab 10 has a ready-made maze.
 
-![Cutebot simulator window](Docs/window.png)
+![Cutebot simulator window](docs/window.png)
 
 ## Features
 
@@ -68,11 +68,23 @@ Labs 1–9 run unmodified; Lab 10 has a ready-made maze.
 | **PyCharm** | [jetbrains.com/pycharm/download](https://www.jetbrains.com/pycharm/download/) | One unified PyCharm; its free core features are all you need |
 | **Git** (optional) | [git-scm.com/downloads](https://git-scm.com/downloads) | Needed to clone and to pull updates |
 
-Check that Python includes Tkinter (the simulator window needs it):
+Check that Python works and includes Tkinter (the simulator window needs it):
 
-```
-python -c "import tkinter; print('Python and Tkinter OK')"
-```
+1. Open **Windows Terminal**: press the **Windows key**, type `Terminal` and press **Enter**
+   (or right-click the **Start** button → **Terminal**). On older Windows, type `cmd` instead
+   to open the Command Prompt. macOS: open **Terminal** from Launchpad.
+2. Copy this line, paste it into the terminal (right-click or **Ctrl+V**) and press **Enter**:
+
+   ```
+   python -c "import tkinter; print('Python and Tkinter OK')"
+   ```
+
+3. It should print `Python and Tkinter OK`.
+   - `python` is not recognised, or the Microsoft Store opens: Python is not installed yet, or
+     the terminal was open before you installed it. Install Python, close the terminal, open a
+     new one and try again.
+   - `No module named 'tkinter'`: reinstall Python from python.org with the default options
+     (Linux: `sudo apt install python3-tk`).
 
 ### 2. Get the project
 
@@ -112,15 +124,32 @@ command (`git pull`); option B needs nothing extra.
 If the repository is private, Git asks you to sign in to GitHub the first time
 (you need access from your lecturer).
 
-### 3. Create the interpreter
+### 3. Create the interpreter (one `venv` for the whole project)
 
-PyCharm may offer to create a virtual environment when the project opens: accept it. Otherwise:
+The whole project uses **one** virtual environment, `venv`, in the **top** project folder:
 
-1. **File → Settings → Python → Python Interpreter**
+```
+CuteBotSimulation/
+    venv/          <- the only venv (not inside CutebotSim)
+    CutebotSim/    the simulator
+    Microbit/      the uploader (added later)
+    MicroPython/   the lab programs (added later)
+```
+
+1. **File → Settings → Python → Interpreter**
    (macOS: **PyCharm → Settings**; older PyCharm versions: **Project: … → Python Interpreter**).
 2. **Add Interpreter → Add Local Interpreter → Virtualenv Environment → New**.
-3. Location: `venv` inside the project folder. Base interpreter: your Python 3. Click **OK**.
-4. The bottom-right corner of PyCharm should now show this interpreter.
+3. Location: `CuteBotSimulation\venv` (the top folder). Base interpreter: your Python 3.
+   Click **OK**.
+4. PyCharm lists the project as **two** entries on the left of this page:
+   **CuteBotSimulation** (the top folder) and **lsbu-cutebot-sim** (the `CutebotSim` folder).
+   Click **each one** and choose the **same** interpreter for both:
+   `CuteBotSimulation\venv\Scripts\python.exe` (macOS/Linux: `venv/bin/python`). Click **OK**.
+
+Both entries must use this same `venv`, otherwise `install_simulator.py` registers the
+simulator in one Python while your programs, the lab files and the uploader run with another,
+and you get `No module named 'microbit'` or `uflash is not installed`. If you find a second
+`venv` inside `CutebotSim`, close PyCharm and delete it.
 
 The simulator needs no packages, so don't install any here. In particular, never install
 `microbit`, `microbit-stubs` or `microbit-dummy` (see the warning below). The only packages you
@@ -134,7 +163,7 @@ ever need are `uflash` and `pyserial`, and only for uploading to a real robot.
    > **If PyCharm asks for an environment** (a yellow bar at the top of the editor saying
    > *Create a virtual environment* / *Custom Environment*), do **not** create a new one:
    > click **Custom Environment** → **Select existing** → Type **Python** → click **…** and
-   > choose `venv\Scripts\python.exe` inside your project folder (the `venv` created in step 3;
+   > choose `CuteBotSimulation\venv\Scripts\python.exe` (the `venv` created in step 3;
    > macOS/Linux: `venv/bin/python`) → **OK**. Then run `install_simulator.py` again.
 
 3. The Run panel at the bottom should end with
@@ -340,7 +369,7 @@ own built-in `microbit` module, so the simulator files are not used there. To up
 ([`MicrobitUploader.py`](https://github.com/mjtroniks/Microbit/blob/main/MicrobitUploader.py)):
 it flashes your file with `uflash` and shows the robot's `print()` output over USB.
 
-![micro:bit Flasher + REPL](Docs/uploader.png)
+![micro:bit Flasher + REPL](docs/uploader.png)
 
 *Example screen (values shown for illustration).*
 
@@ -382,6 +411,7 @@ This adds two folders next to `CutebotSim` in the Project panel:
 
 ```
 CuteBotSimulation/
+    venv/              the project's only venv
     CutebotSim/        the simulator
     Microbit/          MicrobitUploader.py  (the uploader)
     MicroPython/       the lab programs
@@ -463,7 +493,8 @@ connection first: only one program can use a port at a time.
 
 | Problem | Fix |
 |---|---|
-| `ModuleNotFoundError: No module named 'microbit'` | Run `install_simulator.py` with the same interpreter PyCharm uses. |
+| `ModuleNotFoundError: No module named 'microbit'` | The simulator is not registered in this interpreter (e.g. a new `venv`): right-click `CutebotSim/install_simulator.py` → **Run**, then run your program again. |
+| `Cannot run program "...\venv\Scripts\python.exe"` / `CreateProcess error=2` | PyCharm points at a `venv` that does not exist. Create it (step 3) or select the existing one for **both** entries in **Settings → Python → Interpreter**; then **Run → Edit Configurations…** and set the same interpreter (or delete the old run configuration); run `install_simulator.py` again and reinstall `uflash pyserial`. |
 | Program finishes instantly, no window | A look-alike package is installed: `pip uninstall microbit microbit-stubs microbit-dummy`, then run `install_simulator.py` again. |
 | Red underline under `microbit` but it runs | Right-click the project folder → **Mark Directory as → Sources Root**, or **File → Invalidate Caches**. |
 | No simulator window | Python lacks Tkinter: reinstall from python.org. See `cutebot_sim_window.log` in your temp folder. |
@@ -474,6 +505,7 @@ connection first: only one program can use a port at a time.
 | Strange import errors | Don't name your files `microbit.py`, `machine.py`, `utime.py`, `neopixel.py`, `music.py` or `radio.py`. |
 | Join: "Could not connect" | Check the IP on the dashboard, that both PCs are on the same network, and that Windows Firewall allows Python (port 47800). |
 | Find does not find the dashboard | Some networks block broadcasts: type the teacher's IP instead. |
+| Git: `SSL certificate problem: self-signed certificate in certificate chain` | The university network checks HTTPS traffic with its own certificate, which Windows trusts but Git does not by default. Make Git use the Windows certificates: `git config --global http.sslBackend schannel`, then clone again. |
 
 ## Command line
 
@@ -539,7 +571,7 @@ examples/              example programs
 layouts/               example arena layouts (.json)
 tests/                 self-checks
 tools/                 PC tools (accel_monitor.py: live graph of the robot's accelerometer)
-Docs/                  images for this README
+docs/                  images for this README
 ```
 
 ## How it works
@@ -549,6 +581,47 @@ simulator window, which runs as a separate process; they share the robot's state
 small block of shared memory. Because the physics runs inside your program, a breakpoint
 pauses the robot as well. The window owns the arena (size, lines, obstacles) and sends any
 change to the running program immediately.
+
+## Your first program: simulator, then real robot
+
+Follow these steps once from start to finish. After that every program works the same way.
+You need steps 1–4 of [Quick start](#quick-start) done; for the robot part, also the uploader
+from [Hardware support](#hardware-support-uploading-to-a-real-cutebot).
+
+### A. Run it in the simulator
+
+1. In PyCharm's **Project** panel expand **`CutebotSim` → `examples`** and double-click
+   **`01_display_and_buttons.py`** to open it.
+2. Right-click anywhere in the code → **Run '01_display_and_buttons'**.
+3. The simulator window opens and the micro:bit scrolls **Hello LSBU**.
+4. Click the micro:bit's **A** button (or press the **A** key): it shows a happy face.
+   **B** shows a sad face.
+5. Press the red **Stop** button in PyCharm to end the program. Press **Run** again to restart it.
+
+Next try **`02_drive_and_lights.py`** (the robot drives and the headlights change) and
+**`03_line_follow.py`** (it follows the black line), in the same way.
+
+### B. Run the same file on the real Cutebot
+
+1. Put the robot on its **stand** and connect the micro:bit by USB. A drive called
+   **MICROBIT** appears.
+2. Start the uploader: right-click **`Microbit/MicrobitUploader.py` → Run**, or in the Terminal:
+   ```
+   python Microbit/MicrobitUploader.py
+   ```
+3. Click **Browse…** and choose the same file:
+   `CutebotSim/examples/01_display_and_buttons.py`.
+4. Check the **MICROBIT drive** is selected (click **Refresh** if it is empty), then click
+   **Upload to micro:bit**. The orange LED on the back flashes; when it stops, the micro:bit
+   scrolls **Hello LSBU**.
+5. Press **A** and **B** on the real micro:bit: the same faces appear as in the simulator.
+6. Optional: choose the **Serial port** and click **Connect** to see the program's `print()`
+   output and any error messages.
+
+The file was not changed between A and B: whatever works in the simulator runs on the robot.
+For your own programs, save them in **`CutebotSim/labs`**, test them in the simulator, press
+**Check for micro:bit** in the **Code** window, then upload them the same way. For programs
+that drive, take the robot off the stand and put it on the floor or the arena after uploading.
 
 ## Credits
 
