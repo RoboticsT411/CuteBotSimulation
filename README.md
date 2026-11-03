@@ -83,7 +83,10 @@ command (`git pull`); option B needs nothing extra.
 
 1. Open PyCharm. On the Welcome screen click **Clone Repository**
    (if a project is already open: **File → New → Project from Version Control**).
-2. In **URL** paste: `https://github.com/RoboticsT411/CuteBotSimulation.git`
+2. In **URL** paste:
+   ```
+   https://github.com/RoboticsT411/CuteBotSimulation.git
+   ```
 3. Choose a **Directory**, e.g. `C:\Users\<you>\PycharmProjects\CuteBotSimulation`.
 4. Click **Clone**, then **Trust Project**.
 
@@ -363,8 +366,15 @@ The uploader is **not** part of this project: it is `MicrobitUploader.py` in a s
 repository. In PyCharm open the **Terminal** (it opens in your project folder,
 `CuteBotSimulation`) and run:
 
+The uploader:
+
 ```
 git clone https://github.com/mjtroniks/Microbit.git
+```
+
+The lab material:
+
+```
 git clone https://github.com/LSBU-Electronics-Lab/MicroPython.git
 ```
 
@@ -387,7 +397,10 @@ folder. Can't find the uploader? Search File Explorer for `MicrobitUploader.py`.
    ultrasonic sensor is plugged into **SR04** (not I2C).
 2. Connect the micro:bit by USB. It appears as a drive called **MICROBIT**.
 3. Start the uploader: right-click **`Microbit/MicrobitUploader.py` → Run**, or in the
-   Terminal: `python Microbit/MicrobitUploader.py`.
+   Terminal:
+   ```
+   python Microbit/MicrobitUploader.py
+   ```
 4. **Browse…** to your `.py` file, check the **MICROBIT drive** (click **Refresh** if it is
    empty) and click **Upload to micro:bit**. The orange LED on the back flashes; when it
    stops, the program starts.
@@ -420,10 +433,21 @@ moment it starts (connect first, then press the micro:bit's reset button), drive
 **B**, and is ready for another run with **B** after each crash. Every 20 ms the real robot sends
 `time,dx,dz,strength,shake` plus event lines (`START`, `CRASH,...`). Mark mistakes with **A**:
 it hit something but did not stop → `MISSED` (shows ?); it stopped but hit nothing → `FALSE`
-(shows X). On the PC run **`tools/accel_monitor.py`** (needs `pyserial`), pick the port and
-**Connect**: it plots dx, dz, strength and shake live and marks every START, CRASH, MISSED and
-FALSE. **Save CSV** keeps the run for analysis; **Demo data** shows what to expect. Plain text
-in PyCharm's Terminal also works: `python -m serial.tools.miniterm COM5 115200`.
+(shows X).
+
+On the PC run the monitor (needs `pyserial`) from the `CutebotSim` folder:
+
+```
+python tools/accel_monitor.py
+```
+
+Pick the port and **Connect**: it plots dx, dz, strength and shake live and marks every START,
+CRASH, MISSED and FALSE. **Save CSV** keeps the run for analysis; **Demo data** shows what to
+expect. Plain text in PyCharm's Terminal also works (change `COM5` to your port):
+
+```
+python -m serial.tools.miniterm COM5 115200
+```
 
 **Simulator or real robot?** The monitor reads the USB serial port, so it shows the **real
 robot**. When you press Run in PyCharm, the simulated robot's data appears in PyCharm's Run
@@ -453,12 +477,34 @@ connection first: only one program can use a port at a time.
 
 ## Command line
 
+Run a program with the simulator window:
+
 ```
-python examples/03_line_follow.py      # run a program with the simulator window
-python -m cutebot_sim.gui              # open the window on its own
-python -m cutebot_sim.checker my.py    # check a program before uploading
-python -m cutebot_sim.teacher          # teacher's dashboard for LAN competitions
-python tests/smoke_test.py             # self-check, no window
+python examples/03_line_follow.py
+```
+
+Open the window on its own:
+
+```
+python -m cutebot_sim.gui
+```
+
+Check a program before uploading:
+
+```
+python -m cutebot_sim.checker my.py
+```
+
+Teacher's dashboard for LAN competitions:
+
+```
+python -m cutebot_sim.teacher
+```
+
+Self-check, no window:
+
+```
+python tests/smoke_test.py
 ```
 
 ## Robot size and calibration
