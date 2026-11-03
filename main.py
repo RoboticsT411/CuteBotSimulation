@@ -1,27 +1,26 @@
 from microbit import *
-import math
+
+SPEED = 40
+KP = 1.0            # motor speed change per degree off course (try 0.5-2)
 
 def motors(left, right):
     for reg, v in ((0x01, left), (0x02, right)):
-        i2c.write(0x10, bytearray([reg, 0x02 if v >= 0 else 0x01, min(abs(v), 100), 0]))
+        v = max(-100, min(100, int(v)))
+        i2c.write(0x10, bytearray([reg, 0x02 if v >= 0 else 0x01, abs(v), 0]))
 
-accelerometer.set_range(8)          # V2: measure up to 8 g so hard knocks are not cut off
-sleep(500)
-base_x = accelerometer.get_x()      # resting values (robot still, on flat ground)
-base_z = accelerometer.get_z()
-LIMIT = 1500                        # mg - try different values on your robot
+if not compass.is_calibrated():
+    compass.calibrate()             # tilt the micro:bit until the screen fills
 
-motors(40, 40)
-while True:
-    dx = accelerometer.get_x() - base_x
-    dz = accelerometer.get_z() - base_z
-    if math.sqrt(dx * dx + dz * dz) > LIMIT:
-        motors(0, 0)
-        angle = math.degrees(math.atan2(dx, dz))     # 0 = along z, +/-90 = from the side
-        print("CRASH  x", dx, " z", dz, " angle", int(angle))
-        if abs(dz) > abs(dx):
-            display.show(Image.ARROW_N if dz > 0 else Image.ARROW_S)
-        else:
-            display.show(Image.ARROW_E if dx > 0 else Image.ARROW_W)
-        break
-    sleep(5)                        # check often: a bump only lasts a few milliseconds
+display.show("B")
+while not button_b.was_pressed():
+    sleep(20)
+
+target = compass.heading()          # keep the direction it faces now
+display.show(Image.HAPPY)
+while not button_a.was_pressed():   # A stops
+    error = (compass.heading() - target + 180) % 360 - 180   # + = turned right
+    c = KP * error
+    motors(SPEED - c, SPEED + c)    # turned right -> speed up the right wheel
+    sleep(20)
+motors(0, 0)
+display.show(Image.YES)

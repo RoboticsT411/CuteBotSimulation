@@ -95,7 +95,13 @@ BUMP_GAP_S = 0.5             # a new collision only counts after this long witho
 
 # --- accelerometer when the micro:bit stands on the Cutebot ----------------------------
 DISPLAY_FACES_FORWARD = True # the LED display faces the front of the robot (False = the back)
-ACCEL_TAU_S = 0.008          # how quickly the sensed acceleration follows the motion
+ACCEL_TAU_S = 0.03           # smoothing of normal motion (speeding up, braking, turning)
+IMPACT_JUMP_CM_S = 1.0       # a speed change this big within one physics step = an impact
+IMPACT_RISE_S = 0.010        # impact peak = speed change / this (12 cm/s -> about 1.2 g)
+IMPACT_DECAY_S = 0.05        # how long an impact keeps shaking the sensor
+# Driving shakes the upright micro:bit (it rocks in its slot).  Measured on a real Cutebot at
+# speed 40: dz swings by several hundred mg while moving and goes quiet when the robot stalls.
+VIBRATION_MG_PER_CM_S = 25.0 # random shake (standard deviation, mg) per cm/s of real speed
 
 
 class Cutebot:
@@ -119,6 +125,9 @@ class Cutebot:
         self._touching_t = -1.0          # last time the robot was touching something
         self.on_motor = None             # callback(left, right) after a motor command
         self.lin_acc = (0.0, 0.0)        # sensed acceleration: forward, left (cm/s^2)
+        self._smooth_acc = (0.0, 0.0)
+        self._impact = (0.0, 0.0)
+        self.body_speed = 0.0            # how fast the robot really moves (cm/s), for vibration
         self._v_prev = None
         self.reset_to_start()
 
@@ -134,7 +143,7 @@ class Cutebot:
             self.heading = math.radians(heading_deg)
             self.wheel_v = [0.0, 0.0]
             self._v_prev = None              # moved by hand: no acceleration spike
-            self.lin_acc = (0.0, 0.0)
+            self.lin_acc = self._smooth_acc = self._impact = (0.0, 0.0)
 
     def set_map(self, world, reset=False):
         with self.lock:
@@ -180,20 +189,31 @@ class Cutebot:
             self._sense_acceleration(x_before, y_before, dt)
 
     def _sense_acceleration(self, x0, y0, dt):
-        """Acceleration of the robot's body (speeding up, braking, turning, crashes),
-        in the robot's own frame, for the accelerometer."""
+        """Acceleration of the robot's body for the accelerometer, in the robot's frame
+        (forward, left), cm/s^2.  Normal motion is smoothed; a sudden change of speed (an
+        impact) gives a sharp pulse whose size does not depend on the physics step, so it
+        looks the same on every PC."""
         vx, vy = (self.x - x0) / dt, (self.y - y0) / dt
+        k_s = 1.0 - math.exp(-dt / 0.03)
+        self.body_speed += (math.hypot(vx, vy) - self.body_speed) * k_s
         if self._v_prev is None:
             self._v_prev = (vx, vy)
             return
-        ax, ay = (vx - self._v_prev[0]) / dt, (vy - self._v_prev[1]) / dt
-        self._v_prev = (vx, vy)
         c, s = math.cos(self.heading), math.sin(self.heading)
-        fwd = ax * c + ay * s
-        left = ax * s - ay * c                 # left of the robot is (sin h, -cos h)
-        k = dt / (ACCEL_TAU_S + dt)
-        f0, l0 = self.lin_acc
-        self.lin_acc = (f0 + (fwd - f0) * k, l0 + (left - l0) * k)
+        dvx, dvy = vx - self._v_prev[0], vy - self._v_prev[1]
+        self._v_prev = (vx, vy)
+        dv_fwd = dvx * c + dvy * s
+        dv_left = dvx * s - dvy * c                  # left of the robot is (sin h, -cos h)
+        if math.hypot(dv_fwd, dv_left) > IMPACT_JUMP_CM_S:
+            f, l = self._impact                      # an impact: add a sharp pulse
+            self._impact = (f + dv_fwd / IMPACT_RISE_S, l + dv_left / IMPACT_RISE_S)
+        else:
+            k = 1.0 - math.exp(-dt / ACCEL_TAU_S)   # normal motion: smoothed acceleration
+            f, l = self._smooth_acc
+            self._smooth_acc = (f + (dv_fwd / dt - f) * k, l + (dv_left / dt - l) * k)
+        d = math.exp(-dt / IMPACT_DECAY_S)
+        self._impact = (self._impact[0] * d, self._impact[1] * d)
+        self.lin_acc = (self._smooth_acc[0] + self._impact[0], self._smooth_acc[1] + self._impact[1])
 
     def other_boxes(self):
         """Other robots as boxes (for the sonar)."""

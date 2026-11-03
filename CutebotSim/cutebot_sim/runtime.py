@@ -84,6 +84,8 @@ class Runtime:
         self.quiet_threshold = 64
         self.speaker_on = True
         self.accel_range = 2                  # g (accelerometer.set_range)
+        self._shake_t = 0
+        self._shake = (0.0, 0.0)
         # radio (the radio module talks to these)
         self.radio_cfg = {"on": False, "group": 0, "channel": 7, "length": 32, "queue": 3}
         self.radio_queue = []                 # received messages: (bytes, rssi, time_us)
@@ -529,11 +531,21 @@ class Runtime:
                 mg = 1000.0 / 981.0                       # cm/s^2 -> milli-g
                 x += -f * left * mg
                 z += -f * fwd * mg
+                import random
+                from .robot import VIBRATION_MG_PER_CM_S
+                shake = VIBRATION_MG_PER_CM_S * self.robot.body_speed   # driving rocks the board
                 if self.robot.realistic:
-                    import random
-                    x += random.gauss(0, 12)
+                    shake *= 1.5
                     y += random.gauss(0, 12)
+                    x += random.gauss(0, 12)
                     z += random.gauss(0, 12)
+                if shake > 1:
+                    t_ms = int(time.perf_counter() * 50)               # new value every 20 ms,
+                    if t_ms != self._shake_t:                          # like the real sensor
+                        self._shake_t = t_ms
+                        self._shake = (random.gauss(0, shake * 0.4), random.gauss(0, shake))
+                    x += self._shake[0]
+                    z += self._shake[1]
         name, t = self._pulse
         age = time.perf_counter() - t
         if name and age < sensors.PULSE_S:

@@ -49,7 +49,7 @@ Labs 1–9 run unmodified; Lab 10 has a ready-made maze.
 | Line sensors | `pin13` (left), `pin14` (right) `.read_digital()` | **0 over the black line, 1 over white** |
 | Ultrasonic sensor | trigger `pin8`, echo `pin12`, or `machine.time_pulse_us` | measures to walls, obstacles and other robots; no reading closer than 2 cm (like the real HC-SR04) |
 | NeoPixels | `neopixel.NeoPixel(pin15, 2)` | shown as underglow |
-| Timing | `sleep`, `running_time`, `utime.*`, `time.sleep_ms` … | real time |
+| Timing | `sleep`, `running_time`, `utime.*`, `time.sleep_ms` … | real time at 1x; follows pause and slow/fast motion |
 | Accelerometer | `accelerometer.get_x/y/z()`, `current_gesture()`, `was_gesture('shake')`, `set_range(2/4/8)` | **Upright on the Cutebot** (default, as on the robot): y ≈ −1024 at rest, speeding up, braking and crashes show in z (front/back) and x (sideways), the tilt pad tilts the robot. Untick it for a micro:bit on its own (flat). Try `examples/07_crash_detect.py`. |
 | Microphone (V2) | `microphone.sound_level()`, `was_event(SoundEvent.LOUD)` | level slider and **Clap** button |
 | Speaker / music | `music.play(...)`, `music.pitch(...)`, `audio.play(Sound.HAPPY)` | note shown on screen; real beeps on Windows if enabled |
@@ -191,18 +191,23 @@ mouse off the arena, each paste goes 2 cm right and 2 cm down from the last one.
 | **Motors** | Simulate motor mismatch with a slider per wheel (it acts immediately, even while the robot drives); path trail, straightness read-out and correction hint. |
 | **Obstacles** | Add obstacles by corner and size; select one to see its corner and size, type new values and press **Update selected**; delete them. |
 | **Arena** | Arena size (30–500 cm) and tape width, presets (oval, figure eight, obstacles, Lab 10 maze, empty), **Save / Open layout**. |
+| **Sensors** | Accelerometer (tilt pad, gestures), microphone, speaker, temperature and light. See below. |
+| **Race** | Challenge mode (zones, timer, penalties, best times) and joining a LAN competition. |
 
 - **RESET** (top right of the micro:bit, or the **R** key) restarts your program from the top,
   like the micro:bit's reset button: motors stop, the display clears, and the program runs again
   in the same PyCharm Run window. The robot stays where it is (use **Reset to start** in the Robot
   tab to move it back). After a program ends it keeps waiting for RESET; press **Stop** in PyCharm
   to end it.
-- **Sensors tab**: drag the dot on the **tilt pad** to tilt the micro:bit (it rolls "downhill";
-  double-click to level it), or use **Flat / Face down / Logo up / Shake / Freefall**. Set the
-  **Microphone** level or press **Clap** for a loud sound. The speaker line shows the note being
-  played; tick **Play sounds on this PC** to hear it (Windows). Temperature and light have sliders.
-  Try `examples/05_tilt_and_sound.py`.
-- **? micro:bit help** (or **F1**) opens a searchable reference: type e.g. `display`, `button`,
+- **Sensors tab**: with **micro:bit upright on the Cutebot** ticked (default, as on the real
+  robot) the tilt pad tilts the robot (a slope) and the robot's own speeding up, braking and
+  bumps show in the accelerometer's z (front/back) and x (sideways); try
+  `examples/07_crash_detect.py`. Untick it for a micro:bit on its own: the pad tilts the board
+  (double-click to level it) and **Flat / Face down / Logo up** work; try
+  `examples/05_tilt_and_sound.py`. **Shake / Freefall** work in both. Set the **Microphone**
+  level or press **Clap** for a loud sound. The speaker line shows the note being played; tick
+  **Play sounds on this PC** to hear it (Windows). Temperature and light have sliders.
+- **? Help** (or **F1**) opens a searchable reference: type e.g. `display`, `button`,
   `motor` or `line` to see what a function does, an example to copy, whether the simulator supports
   it, and a link to the full entry in the
   [official micro:bit MicroPython V2 documentation](https://microbit-micropython.readthedocs.io/en/v2-docs/).
@@ -354,22 +359,35 @@ python -m pip install uflash pyserial --trusted-host pypi.org --trusted-host fil
 
 ### 2. Get the uploader and the lab material
 
+The uploader is **not** part of this project: it is `MicrobitUploader.py` in a separate
+repository. In PyCharm open the **Terminal** (it opens in your project folder,
+`CuteBotSimulation`) and run:
+
 ```
 git clone https://github.com/mjtroniks/Microbit.git
 git clone https://github.com/LSBU-Electronics-Lab/MicroPython.git
 ```
 
-The first contains `MicrobitUploader.py`; the second contains the lab programs
-(instructions in the [lab wiki](https://github.com/LSBU-Electronics-Lab/MicroPython/wiki)).
-Without Git, use **Code → Download ZIP** on each GitHub page.
+This adds two folders next to `CutebotSim` in the Project panel:
+
+```
+CuteBotSimulation/
+    CutebotSim/        the simulator
+    Microbit/          MicrobitUploader.py  (the uploader)
+    MicroPython/       the lab programs
+```
+
+Lab instructions are in the [lab wiki](https://github.com/LSBU-Electronics-Lab/MicroPython/wiki).
+Without Git, use **Code → Download ZIP** on each GitHub page and extract it into the project
+folder. Can't find the uploader? Search File Explorer for `MicrobitUploader.py`.
 
 ### 3. Upload a program
 
 1. Put the robot on its **stand** so it cannot drive off the bench, and check the
    ultrasonic sensor is plugged into **SR04** (not I2C).
 2. Connect the micro:bit by USB. It appears as a drive called **MICROBIT**.
-3. Start the uploader from the same Terminal: `python Microbit/MicrobitUploader.py`
-   (adjust the path to where you cloned it).
+3. Start the uploader: right-click **`Microbit/MicrobitUploader.py` → Run**, or in the
+   Terminal: `python Microbit/MicrobitUploader.py`.
 4. **Browse…** to your `.py` file, check the **MICROBIT drive** (click **Refresh** if it is
    empty) and click **Upload to micro:bit**. The orange LED on the back flashes; when it
    stops, the program starts.
@@ -387,6 +405,35 @@ Notes:
   or with PyCharm's MicroPython plugin instead.
 - Robot drifting to one side? Measure it, then use the simulator's **Motors** tab to find
   corrected speeds (see above).
+
+### Watching the robot's sensors live (crash detection)
+
+On the real Cutebot a single big accelerometer reading does **not** mean a crash: the upright
+micro:bit rocks in its slot while driving (readings jump by hundreds of mg). What does change is
+that a robot that hits something **stalls and stops shaking**. `examples/07_crash_detect.py`
+uses that (measured on a real robot: driving shake above 180 mg, stalled below 20 mg) and shows
+where it was hit from the jolt just before: F, B, L, R, or S (stalled, no clear jolt).
+The simulator's robot shakes while driving too, so it behaves the same.
+
+`examples/09_crash_debug.py` is the same detector with a data stream. It sends data from the
+moment it starts (connect first, then press the micro:bit's reset button), drives when you press
+**B**, and is ready for another run with **B** after each crash. Every 20 ms the real robot sends
+`time,dx,dz,strength,shake` plus event lines (`START`, `CRASH,...`). Mark mistakes with **A**:
+it hit something but did not stop → `MISSED` (shows ?); it stopped but hit nothing → `FALSE`
+(shows X). On the PC run **`tools/accel_monitor.py`** (needs `pyserial`), pick the port and
+**Connect**: it plots dx, dz, strength and shake live and marks every START, CRASH, MISSED and
+FALSE. **Save CSV** keeps the run for analysis; **Demo data** shows what to expect. Plain text
+in PyCharm's Terminal also works: `python -m serial.tools.miniterm COM5 115200`.
+
+**Simulator or real robot?** The monitor reads the USB serial port, so it shows the **real
+robot**. When you press Run in PyCharm, the simulated robot's data appears in PyCharm's Run
+window instead. Both start with a `SOURCE,REAL` or `SOURCE,SIMULATOR` line, the monitor's top
+line says where its data comes from (REAL ROBOT, SIMULATOR or DEMO), and the CSV has a
+`source` column.
+
+To let the robot drive without a cable, put `examples/09_radio_receiver.py` on a second
+micro:bit, plug that one into the PC and connect the monitor to it. Close the uploader's serial
+connection first: only one program can use a port at a time.
 
 ## Troubleshooting
 
@@ -445,7 +492,8 @@ labs/                  your programs
 examples/              example programs
 layouts/               example arena layouts (.json)
 tests/                 self-checks
-docs/                  images for this README
+tools/                 PC tools (accel_monitor.py: live graph of the robot's accelerometer)
+Docs/                  images for this README
 ```
 
 ## How it works

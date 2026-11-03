@@ -17,6 +17,8 @@ MICROBIT_MODULES = {
     "random", "math", "gc", "micropython", "os", "struct", "ustruct", "array", "sys", "power",
     "log", "collections", "ucollections", "love", "this", "antigravity",
 }
+# Functions added in MicroPython 2.1+ for the micro:bit: missing in the firmware uflash flashes.
+NEWER_FIRMWARE = {"set_range", "run_every", "set_threshold"}
 UFLASH_LIMIT = 8188          # uflash refuses scripts bigger than this (bytes)
 
 ERROR, WARNING, NOTE = "error", "warning", "note"
@@ -44,6 +46,15 @@ def _const(node):
 class _Visitor(ast.NodeVisitor):
     def __init__(self):
         self.found = []
+        self.in_try = 0
+
+    def visit_Try(self, node):
+        self.in_try += 1
+        for n in node.body:
+            self.visit(n)
+        self.in_try -= 1
+        for n in node.handlers + node.orelse + node.finalbody:
+            self.visit(n)
 
     def add(self, node, level, text):
         self.found.append((getattr(node, "lineno", 0), level, text))
@@ -76,6 +87,10 @@ class _Visitor(ast.NodeVisitor):
             self.add(node, NOTE, f"sleep({_const(node.args[0])}) waits {_const(node.args[0])} "
                                  "millisecond(s) - the micro:bit's sleep() is in ms "
                                  "(sleep(1000) = 1 second).")
+        if name in NEWER_FIRMWARE and isinstance(f, ast.Attribute) and not self.in_try:
+            self.add(node, WARNING, f"{name}() needs MicroPython 2.1 or newer. The uploader "
+                                    "(uflash) flashes an older version where it does not exist: "
+                                    "put it inside try: ... except AttributeError: pass.")
         if name in ("scroll", "show") and isinstance(f, ast.Attribute) and node.args:
             text = _const(node.args[0])
             if isinstance(text, str) and any(ord(c) > 126 for c in text):
