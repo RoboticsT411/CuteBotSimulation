@@ -122,7 +122,26 @@ command (`git pull`); option B needs nothing extra.
 (`install_simulator.py`, `microbit/`, `cutebot_sim/`, `labs/`, `examples/`) are in `CutebotSim`.
 
 If the repository is private, Git asks you to sign in to GitHub the first time
-(you need access from your lecturer).
+(you need access from your lecturer). In PyCharm you can also sign in beforehand:
+**Settings → Version Control → GitHub → + → Log in via GitHub**.
+
+**If the clone fails with an SSL error** (e.g. `SSL certificate problem: unable to get local
+issuer certificate` or `self-signed certificate in certificate chain`): the university network
+checks HTTPS traffic with its own certificate, which Windows trusts but Git does not by default.
+Open a terminal (Windows: Start → *Terminal*, or PyCharm's **Terminal**), run this once, then
+clone again (options A or C):
+
+```
+git config --global http.sslBackend schannel
+```
+
+- Error mentions **revocation** (`CRYPT_E_NO_REVOCATION_CHECK`, `CRYPT_E_REVOCATION_OFFLINE`):
+  also run `git config --global http.schannelCheckRevoke false`.
+- **Could not resolve host** / **Failed to connect**: the PC is behind a proxy. Ask IT for its
+  address and run `git config --global http.proxy http://PROXY:PORT`.
+- **Repository not found** / **403**: you are not signed in with an account that has access.
+- Do **not** use `http.sslVerify false`: it switches off certificate checking completely.
+- Still stuck? Use option B (Download ZIP), which needs no Git.
 
 ### 3. Create the interpreter (one `venv` for the whole project)
 
@@ -476,156 +495,4 @@ CRASH, MISSED and FALSE. **Save CSV** keeps the run for analysis; **Demo data** 
 expect. Plain text in PyCharm's Terminal also works (change `COM5` to your port):
 
 ```
-python -m serial.tools.miniterm COM5 115200
-```
-
-**Simulator or real robot?** The monitor reads the USB serial port, so it shows the **real
-robot**. When you press Run in PyCharm, the simulated robot's data appears in PyCharm's Run
-window instead. Both start with a `SOURCE,REAL` or `SOURCE,SIMULATOR` line, the monitor's top
-line says where its data comes from (REAL ROBOT, SIMULATOR or DEMO), and the CSV has a
-`source` column.
-
-To let the robot drive without a cable, put `examples/09_radio_receiver.py` on a second
-micro:bit, plug that one into the PC and connect the monitor to it. Close the uploader's serial
-connection first: only one program can use a port at a time.
-
-## Troubleshooting
-
-| Problem | Fix |
-|---|---|
-| `ModuleNotFoundError: No module named 'microbit'` | The simulator is not registered in this interpreter (e.g. a new `venv`): right-click `CutebotSim/install_simulator.py` → **Run**, then run your program again. |
-| `Cannot run program "...\venv\Scripts\python.exe"` / `CreateProcess error=2` | PyCharm points at a `venv` that does not exist. Create it (step 3) or select the existing one for **both** entries in **Settings → Python → Interpreter**; then **Run → Edit Configurations…** and set the same interpreter (or delete the old run configuration); run `install_simulator.py` again and reinstall `uflash pyserial`. |
-| Program finishes instantly, no window | A look-alike package is installed: `pip uninstall microbit microbit-stubs microbit-dummy`, then run `install_simulator.py` again. |
-| Red underline under `microbit` but it runs | Right-click the project folder → **Mark Directory as → Sources Root**, or **File → Invalidate Caches**. |
-| No simulator window | Python lacks Tkinter: reinstall from python.org. See `cutebot_sim_window.log` in your temp folder. |
-| `TypeError` on motor speeds | Use whole numbers 0–100. |
-| Uploader: "No MICROBIT drive found" | Use a data USB cable, reconnect the micro:bit, click **Refresh**. The drive must show **MICROBIT** in File Explorer. |
-| Uploader: "pyserial not installed" / "uflash is not installed" | Run `python -m pip install uflash pyserial` with the Python that starts the uploader. |
-| Uploader: cannot connect to COM port | Close other programs using the port (PyCharm's MicroPython REPL, another uploader window) and try again. |
-| Strange import errors | Don't name your files `microbit.py`, `machine.py`, `utime.py`, `neopixel.py`, `music.py` or `radio.py`. |
-| Join: "Could not connect" | Check the IP on the dashboard, that both PCs are on the same network, and that Windows Firewall allows Python (port 47800). |
-| Find does not find the dashboard | Some networks block broadcasts: type the teacher's IP instead. |
-| Git: `SSL certificate problem: self-signed certificate in certificate chain` | The university network checks HTTPS traffic with its own certificate, which Windows trusts but Git does not by default. Make Git use the Windows certificates: `git config --global http.sslBackend schannel`, then clone again. |
-
-## Command line
-
-Run a program with the simulator window:
-
-```
-python examples/03_line_follow.py
-```
-
-Open the window on its own:
-
-```
-python -m cutebot_sim.gui
-```
-
-Check a program before uploading:
-
-```
-python -m cutebot_sim.checker my.py
-```
-
-Teacher's dashboard for LAN competitions:
-
-```
-python -m cutebot_sim.teacher
-```
-
-Self-check, no window:
-
-```
-python tests/smoke_test.py
-```
-
-## Robot size and calibration
-
-The robot's geometry is set by a few measurements at the top of `cutebot_sim/robot.py`
-(overall length and width, wheel size, axle position, line-sensor position and spacing).
-The drawing, wheel spacing, sensors and collisions are calculated from them. Measure your
-Cutebot and change them to match it; top speed and motor response can be tuned there too.
-
-## Project structure
-
-```
-install_simulator.py   run once per virtual environment
-teacher_dashboard.py   teacher's dashboard for LAN competitions
-microbit/              the simulated micro:bit module
-utime.py machine.py neopixel.py music.py radio.py
-cutebot_sim/
-    robot.py           Cutebot model and physics (geometry settings at the top)
-    maps.py            arenas, presets and layout files
-    display.py         Image and display
-    runtime.py         connects your program to the window, runs the physics
-    gui.py             the simulator window (Tkinter)
-    panels.py          Code, Graphs and Radio windows
-    race.py            challenge mode and the student side of competitions
-    teacher.py         teacher's dashboard
-    net.py             LAN link (standard library sockets)
-    checker.py         micro:bit compatibility checker
-    shared.py          shared-memory link between program and window
-    _data.py           micro:bit font and images
-labs/                  your programs
-examples/              example programs
-layouts/               example arena layouts (.json)
-tests/                 self-checks
-tools/                 PC tools (accel_monitor.py: live graph of the robot's accelerometer)
-docs/                  images for this README
-```
-
-## How it works
-
-Importing `microbit` starts a physics thread inside your program and connects to the
-simulator window, which runs as a separate process; they share the robot's state through a
-small block of shared memory. Because the physics runs inside your program, a breakpoint
-pauses the robot as well. The window owns the arena (size, lines, obstacles) and sends any
-change to the running program immediately.
-
-## Your first program: simulator, then real robot
-
-Follow these steps once from start to finish. After that every program works the same way.
-You need steps 1–4 of [Quick start](#quick-start) done; for the robot part, also the uploader
-from [Hardware support](#hardware-support-uploading-to-a-real-cutebot).
-
-### A. Run it in the simulator
-
-1. In PyCharm's **Project** panel expand **`CutebotSim` → `examples`** and double-click
-   **`01_display_and_buttons.py`** to open it.
-2. Right-click anywhere in the code → **Run '01_display_and_buttons'**.
-3. The simulator window opens and the micro:bit scrolls **Hello LSBU**.
-4. Click the micro:bit's **A** button (or press the **A** key): it shows a happy face.
-   **B** shows a sad face.
-5. Press the red **Stop** button in PyCharm to end the program. Press **Run** again to restart it.
-
-Next try **`02_drive_and_lights.py`** (the robot drives and the headlights change) and
-**`03_line_follow.py`** (it follows the black line), in the same way.
-
-### B. Run the same file on the real Cutebot
-
-1. Put the robot on its **stand** and connect the micro:bit by USB. A drive called
-   **MICROBIT** appears.
-2. Start the uploader: right-click **`Microbit/MicrobitUploader.py` → Run**, or in the Terminal:
-   ```
-   python Microbit/MicrobitUploader.py
-   ```
-3. Click **Browse…** and choose the same file:
-   `CutebotSim/examples/01_display_and_buttons.py`.
-4. Check the **MICROBIT drive** is selected (click **Refresh** if it is empty), then click
-   **Upload to micro:bit**. The orange LED on the back flashes; when it stops, the micro:bit
-   scrolls **Hello LSBU**.
-5. Press **A** and **B** on the real micro:bit: the same faces appear as in the simulator.
-6. Optional: choose the **Serial port** and click **Connect** to see the program's `print()`
-   output and any error messages.
-
-The file was not changed between A and B: whatever works in the simulator runs on the robot.
-For your own programs, save them in **`CutebotSim/labs`**, test them in the simulator, press
-**Check for micro:bit** in the **Code** window, then upload them the same way. For programs
-that drive, take the robot off the stand and put it on the floor or the arena after uploading.
-
-## Credits
-
-- micro:bit font from Lancaster University [codal-core](https://github.com/lancaster-university/codal-core) (MIT).
-- Built-in images from [micropython-microbit-v2](https://github.com/microbit-foundation/micropython-microbit-v2) by Damien P. George (MIT).
-
-Both are included in `cutebot_sim/_data.py` with their licence notices.
+python -m
